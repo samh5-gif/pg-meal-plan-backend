@@ -696,26 +696,46 @@ def generate_pdf_doc(client_name, days, logo_b64, shopping_lists=None):
     draw_cover(c, client_name, logo_b64)
     c.showPage()
     any_fruit = has_fruit(days)
+    first_day = True
+    y = 48.0
+
     for day in days:
-        y = 48.0
+        # Estimate header height
+        hdr_h = 96 + (50 if any_fruit and day_has_fruit(day) else 0) + 12
+
+        # If not at top of page and header won't fit, start new page
+        if not first_day:
+            if y + hdr_h + 150 > PH - 40:
+                c.showPage()
+                y = 48.0
+            else:
+                y += 28  # gap between days on same page
+
+        first_day = False
+
         y = draw_day_header(c, y, day['day_num'],
                             day['total_kcal'], day['total_prot'], day['total_fat'], day['total_carb'],
                             fruit_note=any_fruit and day_has_fruit(day))
+        y += 14
+
         for meal in day['meals']:
             steps = meal.get('recipe_steps', [])
             n_step_lines = sum(len(wrap(s, H, 9.5, RM-(LM+24))) for s in steps)
-            card_h = 44+38+18+14+len(meal['ingredients'])*14+20+22+n_step_lines*13+len(steps)*2+20
+            # Accurate estimate matching draw_meal_card exactly:
+            # header(44) + macro(38) + gap(18) + ING_label(14) + rows + divider(14) + METHOD_label(14) + steps + trailing(12)
+            card_h = 44+38+18+14+(len(meal['ingredients'])*14)+14+14+(n_step_lines*13)+(len(steps)*2)+12
             if y + card_h > PH - 40:
                 c.showPage(); y = 48.0
             y = draw_meal_card(c, y, meal['meal_label'], meal.get('dish_name',''),
                                meal['kcal'], meal['prot'], meal['fat'], meal['carb'],
                                meal['ingredients'], steps)
             y += 14
-        c.showPage()
-    # Shopping list pages
+    # Shopping list pages — always start on a new page
     if shopping_lists:
-        for sl in shopping_lists:
-            c.showPage()
+        c.showPage()
+        for i, sl in enumerate(shopping_lists):
+            if i > 0:
+                c.showPage()
             draw_shopping_list(c, sl)
 
     c.save(); buf.seek(0)
