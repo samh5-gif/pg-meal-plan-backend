@@ -1,0 +1,7 @@
+flask
+flask-cors
+openpyxl
+reportlab
+anthropic
+gunicorn
+Pillow
