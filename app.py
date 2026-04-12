@@ -1,155 +1,129 @@
 """
-Project GAIN — Meal Plan PDF Generator
-Backend: Flask API
+Project GAIN — Meal Plan PDF + Recipe Guide Generator
+Backend: Flask API with Anthropic AI for recipe generation
 """
 
-import os, re, json, io, base64, textwrap
-from flask import Flask, request, jsonify, send_file
+import os, re, io, base64, json, tempfile
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import openpyxl
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase.pdfmetrics import stringWidth
-from PIL import Image as PILImage
+import anthropic
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.after_request
-def add_cors_headers(response):
+def add_cors(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     return response
 
 @app.route('/upload', methods=['OPTIONS'])
-@app.route('/generate', methods=['OPTIONS'])
+@app.route('/clarify', methods=['OPTIONS'])
+@app.route('/generate-pdf', methods=['OPTIONS'])
 @app.route('/health', methods=['OPTIONS'])
-def handle_options():
+def options():
     return '', 204
 
-# ── Ambiguous ingredient rules ────────────────────────────────────────────────
-# Items that can't practically be weighed by grams and need a human note
-AMBIGUOUS_EXCLUSIONS = [
-    'egg white', 'protein water', 'egg powder', 'dried egg', 'passionfruit',
+# ── Anthropic client ──────────────────────────────────────────────────────────
+def get_claude():
+    return anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
+
+# ── Session store ─────────────────────────────────────────────────────────────
+_sessions = {}
+
+# ── Ambiguous ingredient detection ───────────────────────────────────────────
+EXCLUSIONS = ['egg white', 'protein water', 'egg powder', 'passionfruit']
+
+AMBIGUOUS = [
+    # Eggs — sized at ~60g each for large, ~50g medium
+    (r'\bboiled eggs?\b',    'boiled egg',    'Based on {qty}g: we recommend {n} large boiled egg{s}. A large egg is ~60g.'),
+    (r'\bscrambled eggs?\b', 'scrambled egg', 'Based on {qty}g: we recommend {n} large egg{s}, scrambled. A large egg is ~60g.'),
+    (r'\bfried eggs?\b',     'fried egg',     'Based on {qty}g: we recommend {n} large fried egg{s}. A large egg is ~60g.'),
+    (r'\bpoached eggs?\b',   'poached egg',   'Based on {qty}g: we recommend {n} large poached egg{s}. A large egg is ~60g.'),
+    (r'^eggs?$',             'egg',           'Based on {qty}g: we recommend {n} large egg{s}. A large egg is ~60g.'),
+    # Fruit — specific size guidance per fruit
+    (r'\bapple\b',    'apple',       'Based on {qty}g: we recommend 1 large apple. A medium apple is ~130g, large is ~180g.'),
+    (r'\bbanana\b',   'banana',      'Based on {qty}g: we recommend 1 medium banana. A small banana is ~80g, medium is ~120g.'),
+    (r'\bpeach\b',    'peach',       'Based on {qty}g: we recommend 1 large peach. A medium peach is ~150g, large is ~200g.'),
+    (r'\bplum\b',     'plum',        'Based on {qty}g: we recommend 1 large plum. A medium plum is ~65g, large is ~85g.'),
+    (r'\borange\b',   'orange',      'Based on {qty}g: we recommend 1 large orange. A medium orange is ~130g, large is ~185g.'),
+    (r'\bpear\b',     'pear',        'Based on {qty}g: we recommend 1 medium pear. A medium pear is ~160g.'),
+    (r'^mango\b',      'mango',       'Based on {qty}g: we recommend half a large mango. A whole large mango is ~350g.'),
+    (r'\bkiwi\b',     'kiwi',        'Based on {qty}g: we recommend {n} kiwi{s}. A standard kiwi is ~70g.'),
+    (r'\bgrapes?\b',  'grapes',      'Based on {qty}g: we recommend a small bunch of grapes (~15-18 grapes).'),
+    # Veg
+    (r'\bcarrots?\b', 'carrot',      'Based on {qty}g: we recommend 1 medium carrot. A medium carrot is ~80g.'),
+    (r'\bcourgette\b','courgette',   'Based on {qty}g: we recommend half a medium courgette. A whole medium courgette is ~200g.'),
+    (r'\bavocado\b',  'avocado',     'Based on {qty}g: we recommend half a medium avocado. A whole medium avocado is ~150g.'),
+    (r'\bonion\b',    'onion',       'Based on {qty}g: we recommend half a medium onion. A whole medium onion is ~150g.'),
+    (r'\bsweet potato\b', 'sweet potato', 'Based on {qty}g: we recommend 1 medium sweet potato. A medium one is ~130g.'),
+    (r'\bpotato\b',   'potato',      'Based on {qty}g: we recommend 1 medium potato. A medium potato is ~150g.'),
 ]
 
-AMBIGUOUS_PATTERNS = [
-    # Whole eggs only — not egg whites
-    (r'\bboiled eggs?\b',    'boiled egg',    'e.g. "1 large boiled egg (~60g)"'),
-    (r'\bscrambled eggs?\b', 'scrambled egg', 'e.g. "2 large eggs scrambled"'),
-    (r'\bfried eggs?\b',     'fried egg',     'e.g. "1 large fried egg"'),
-    (r'\bpoached eggs?\b',   'poached egg',   'e.g. "1 large poached egg"'),
-    (r'^eggs?$',               'egg',           'e.g. "2 large eggs" or "2 medium eggs"'),
-    # Fruits (whole pieces)
-    (r'\bapple\b',   'apple',        'e.g. "1 large apple" or "1 medium apple"'),
-    (r'\bbanana\b',  'banana',       'e.g. "1 medium banana" or "1 small banana"'),
-    (r'\bpeach\b',   'peach',        'e.g. "1 large peach" or "1 medium peach"'),
-    (r'\bplum\b',    'plum',         'e.g. "1 large plum" or "2 small plums"'),
-    (r'\borange\b',  'orange',       'e.g. "1 large orange"'),
-    (r'\bpear\b',    'pear',         'e.g. "1 medium pear"'),
-    (r'^mango',        'mango',        'e.g. "half a large mango"'),
-    (r'\bkiwi\b',    'kiwi',         'e.g. "2 kiwis"'),
-    (r'\bgrapes?\b', 'grapes',       'e.g. "a small handful of grapes"'),
-    # Veg hard to weigh precisely
-    (r'\bcarrots?\b',      'carrot',       'e.g. "1 medium carrot" or "2 small carrots"'),
-    (r'\bcourgette\b',     'courgette',    'e.g. "half a medium courgette"'),
-    (r'\bavocado\b',       'avocado',      'e.g. "half an avocado"'),
-    (r'\bonion\b',         'onion',        'e.g. "half a medium onion"'),
-    (r'\bsweet potato\b',  'sweet potato', 'e.g. "1 medium sweet potato"'),
-    (r'\bpotato\b',        'potato',       'e.g. "1 medium potato"'),
-]
-
-# Fruits specifically (for the fruit note)
-FRUIT_NAMES = {
-    'apple', 'banana', 'peach', 'plum', 'orange', 'pear', 'mango',
-    'kiwi', 'grapes', 'blueberries', 'blueberry', 'strawberries',
-    'strawberry', 'raspberries', 'raspberry', 'blackberries', 'blackberry',
-    'melon', 'watermelon', 'pineapple', 'cherry', 'cherries', 'grape',
-    'lemon', 'lime', 'grapefruit', 'fig', 'date', 'apricot', 'nectarine',
-    'pomegranate', 'passion fruit', 'passionfruit',
-}
+def size_suggestion(tpl, qty_g):
+    qty = int(qty_g) if qty_g == int(qty_g) else qty_g
+    n = max(1, round(qty_g / 60))
+    s = 's' if n > 1 else ''
+    return tpl.format(qty=qty, n=n, s=s)
 
 def check_ambiguous(qty_g, food_name):
-    """Return ambiguity info if ingredient needs clarification, else None."""
     name_lower = food_name.lower()
-    # Skip excluded items
-    for excl in AMBIGUOUS_EXCLUSIONS:
+    for excl in EXCLUSIONS:
         if excl in name_lower:
             return None
-    for pattern, label, hint in AMBIGUOUS_PATTERNS:
+    for pattern, label, suggestion_tpl in AMBIGUOUS:
         if re.search(pattern, name_lower, re.IGNORECASE):
             return {
                 'food': food_name,
                 'qty_g': qty_g,
                 'label': label,
-                'hint': hint,
+                'key': name_lower.strip(),
+                'suggestion': size_suggestion(suggestion_tpl, qty_g),
             }
     return None
 
 def is_fruit(food_name):
-    name_lower = food_name.lower()
-    for fruit in FRUIT_NAMES:
-        if fruit in name_lower:
-            return True
-    return False
+    fruits = {'apple','banana','peach','plum','orange','pear','mango','kiwi',
+              'grape','blueberr','strawberr','raspberr','blackberr','melon',
+              'pineapple','cherry','lemon','lime','grapefruit','fig','date',
+              'apricot','nectarine','pomegranate'}
+    name = food_name.lower()
+    return any(f in name for f in fruits)
 
 # ── Excel parsing ─────────────────────────────────────────────────────────────
-
 def parse_excel(file_bytes, filename):
-    """
-    Parse the meal plan Excel.
-    Returns:
-      client_name: str
-      days: list of {
-        day_num: int,
-        total_kcal, total_prot, total_fat, total_carb: float,
-        meals: list of {
-          meal_num: int,
-          meal_label: str,   # "Meal 1" etc
-          kcal, prot, fat, carb: float,
-          ingredients: list of {food, qty_g, qty_label (None initially)}
-        }
-      }
-    """
-    # Client name from filename — strip extension, replace underscores/hyphens
     stem = os.path.splitext(filename)[0]
-    # Try to extract name from patterns like "Meal_Plan_-_John_Smith__1_"
-    # Remove common prefixes
     stem = re.sub(r'(?i)meal[\s_-]*plan[\s_-]*[-_]*', '', stem)
-    stem = re.sub(r'[\s_-]+\d+[\s_-]*$', '', stem)  # trailing numbers
+    stem = re.sub(r'[\s_-]+\d+[\s_-]*$', '', stem)
     stem = re.sub(r'[_]+', ' ', stem).strip(' -_()[]')
-    # Capitalise each word
-    client_name = ' '.join(w.capitalize() for w in stem.split() if w)
-    if not client_name:
-        client_name = 'Client'
+    client_name = ' '.join(w.capitalize() for w in stem.split() if w) or 'Client'
 
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-
     days = []
     day_num = 0
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
-        name_lower = sheet_name.lower()
-
-        # Only process "Meal Plan Day N" sheets
-        if 'meal plan day' not in name_lower and 'meal' not in name_lower:
+        nl = sheet_name.lower()
+        if 'shopping' in nl or ('food' in nl and 'list' in nl):
             continue
-        if 'shopping' in name_lower or 'food' in name_lower.replace('foodlist',''):
+        if 'meal' not in nl and 'day' not in nl:
             continue
 
         day_num += 1
-
         rows = list(ws.iter_rows(values_only=True))
         if not rows:
             continue
 
-        # Find header row
         header_row = None
         for i, row in enumerate(rows):
-            row_str = [str(c).lower() if c else '' for c in row]
-            if any('meal' in c for c in row_str) and any('food' in c or 'item' in c for c in row_str):
+            row_s = [str(c).lower() if c else '' for c in row]
+            if any('meal' in c for c in row_s) and any('food' in c or 'item' in c for c in row_s):
                 header_row = i
                 break
         if header_row is None:
@@ -157,156 +131,94 @@ def parse_excel(file_bytes, filename):
 
         headers = [str(c).lower().strip() if c else '' for c in rows[header_row]]
 
-        # Identify column indices
-        def col(keywords):
+        def col(kws):
             for i, h in enumerate(headers):
-                if any(k in h for k in keywords):
+                if any(k in h for k in kws):
                     return i
             return None
 
-        meal_col  = col(['meal'])
-        food_col  = col(['food', 'item', 'ingredient'])
-        qty_col   = col(['quantity', 'qty', 'amount', 'weight'])
-        kcal_col  = col(['calori', 'kcal', 'energy'])
-        prot_col  = col(['protein'])
-        fat_col   = col(['fat'])
-        carb_col  = col(['carb'])
-        total_macros_col = col(['total macros'])
-        daily_col = col(['daily total'])
+        meal_col = col(['meal'])
+        food_col = col(['food', 'item', 'ingredient'])
+        qty_col  = col(['quantity', 'qty', 'amount', 'weight'])
+        kcal_col = col(['calori', 'kcal', 'energy'])
+        prot_col = col(['protein'])
+        fat_col  = col(['fat'])
+        carb_col = col(['carb'])
 
-        # Parse daily totals from the "Daily Totals" column if present
-        daily_kcal = daily_prot = daily_fat = daily_carb = 0.0
-        if daily_col is not None:
-            for row in rows[header_row+1:]:
-                cell_val = str(row[daily_col]).strip() if row[daily_col] is not None else ''
-                if 'calori' in cell_val.lower() or 'kcal' in cell_val.lower():
-                    # Next cell might have value
-                    pass
-                # Look for Total macros label + values in same region
-            # Simpler: scan for the summary block
-            for i, row in enumerate(rows[header_row+1:], header_row+1):
-                if row[total_macros_col] if total_macros_col is not None else False:
-                    label = str(row[total_macros_col]).lower()
-                    val_cell = row[daily_col] if daily_col < len(row) else None
-                    try:
-                        val = float(val_cell) if val_cell is not None else 0
-                    except:
-                        val = 0
-                    if 'calori' in label or 'kcal' in label:
-                        daily_kcal = val
-                    elif 'protein' in label:
-                        daily_prot = val
-                    elif 'fat' in label:
-                        daily_fat = val
-                    elif 'carb' in label:
-                        daily_carb = val
+        def to_f(v):
+            try: return float(v)
+            except: return 0.0
 
-        # Parse meal rows
-        meals_dict = {}  # meal_label -> {kcal,prot,fat,carb,ingredients}
-
+        meals_dict = {}
         for row in rows[header_row+1:]:
             if not any(row):
                 continue
-            meal_val = str(row[meal_col]).strip() if (meal_col is not None and row[meal_col] is not None) else ''
-            if not meal_val or meal_val.lower() in ('none', 'nan', 'meal'):
+            mv = str(row[meal_col]).strip() if meal_col is not None and row[meal_col] else ''
+            if not mv or not re.match(r'meal\s*\d+', mv, re.IGNORECASE):
                 continue
-            # Must start with "Meal"
-            if not re.match(r'meal\s*\d+', meal_val, re.IGNORECASE):
-                continue
-
-            food_val  = str(row[food_col]).strip()  if (food_col  is not None and row[food_col]  is not None) else ''
-            qty_raw   = row[qty_col]  if qty_col  is not None else None
-            kcal_raw  = row[kcal_col] if kcal_col is not None else None
-            prot_raw  = row[prot_col] if prot_col is not None else None
-            fat_raw   = row[fat_col]  if fat_col  is not None else None
-            carb_raw  = row[carb_col] if carb_col is not None else None
-
-            def to_f(v):
-                try: return float(v)
-                except: return 0.0
-
-            qty_g  = to_f(qty_raw)
-            kcal_v = to_f(kcal_raw)
-            prot_v = to_f(prot_raw)
-            fat_v  = to_f(fat_raw)
-            carb_v = to_f(carb_raw)
-
-            if not food_val or food_val.lower() == 'nan':
+            fv = str(row[food_col]).strip() if food_col is not None and row[food_col] else ''
+            if not fv or fv.lower() == 'nan':
                 continue
 
-            if meal_val not in meals_dict:
-                meals_dict[meal_val] = {
-                    'meal_label': meal_val,
-                    'kcal': 0.0, 'prot': 0.0, 'fat': 0.0, 'carb': 0.0,
-                    'ingredients': [],
-                }
+            qty_g  = to_f(row[qty_col]  if qty_col  is not None else 0)
+            kcal_v = to_f(row[kcal_col] if kcal_col is not None else 0)
+            prot_v = to_f(row[prot_col] if prot_col is not None else 0)
+            fat_v  = to_f(row[fat_col]  if fat_col  is not None else 0)
+            carb_v = to_f(row[carb_col] if carb_col is not None else 0)
 
-            meals_dict[meal_val]['kcal'] += kcal_v
-            meals_dict[meal_val]['prot'] += prot_v
-            meals_dict[meal_val]['fat']  += fat_v
-            meals_dict[meal_val]['carb'] += carb_v
-            meals_dict[meal_val]['ingredients'].append({
-                'food': food_val,
+            if mv not in meals_dict:
+                meals_dict[mv] = {'meal_label': mv, 'kcal': 0, 'prot': 0, 'fat': 0, 'carb': 0, 'ingredients': []}
+
+            meals_dict[mv]['kcal'] += kcal_v
+            meals_dict[mv]['prot'] += prot_v
+            meals_dict[mv]['fat']  += fat_v
+            meals_dict[mv]['carb'] += carb_v
+            meals_dict[mv]['ingredients'].append({
+                'food': fv,
                 'qty_g': qty_g,
-                'qty_label': None,  # filled in after clarification
+                'qty_label': None,
+                'excel_qty_g': qty_g,
             })
 
-        # Sort meals
-        def meal_sort_key(m):
+        def meal_key(m):
             nums = re.findall(r'\d+', m)
             return int(nums[0]) if nums else 0
 
-        meals_sorted = sorted(meals_dict.values(), key=lambda m: meal_sort_key(m['meal_label']))
-
-        # Round meal macros
-        for m in meals_sorted:
+        meals = sorted(meals_dict.values(), key=lambda m: meal_key(m['meal_label']))
+        for m in meals:
             m['kcal'] = round(m['kcal'])
             m['prot'] = round(m['prot'], 1)
             m['fat']  = round(m['fat'],  1)
             m['carb'] = round(m['carb'], 1)
-
-        # Derive daily totals from sum if not parsed
-        if daily_kcal == 0:
-            daily_kcal = round(sum(m['kcal'] for m in meals_sorted))
-            daily_prot = round(sum(m['prot'] for m in meals_sorted), 1)
-            daily_fat  = round(sum(m['fat']  for m in meals_sorted), 1)
-            daily_carb = round(sum(m['carb'] for m in meals_sorted), 1)
+            m['dish_name'] = ''
+            m['recipe_steps'] = []
 
         days.append({
             'day_num': day_num,
             'sheet': sheet_name,
-            'total_kcal': round(daily_kcal),
-            'total_prot': round(daily_prot, 1),
-            'total_fat':  round(daily_fat,  1),
-            'total_carb': round(daily_carb, 1),
-            'meals': meals_sorted,
+            'total_kcal': round(sum(m['kcal'] for m in meals)),
+            'total_prot': round(sum(m['prot'] for m in meals), 1),
+            'total_fat':  round(sum(m['fat']  for m in meals), 1),
+            'total_carb': round(sum(m['carb'] for m in meals), 1),
+            'meals': meals,
         })
 
     return client_name, days
 
 
-def find_ambiguous_ingredients(days):
-    """Return list of items needing clarification."""
-    ambiguous = []
-    seen = set()
+def find_ambiguous(days):
+    seen, result = set(), []
     for day in days:
         for meal in day['meals']:
             for ing in meal['ingredients']:
-                result = check_ambiguous(ing['qty_g'], ing['food'])
-                if result:
-                    key = ing['food'].lower().strip()
-                    if key not in seen:
-                        seen.add(key)
-                        result['key'] = key
-                        ambiguous.append(result)
-    return ambiguous
+                a = check_ambiguous(ing['qty_g'], ing['food'])
+                if a and a['key'] not in seen:
+                    seen.add(a['key'])
+                    result.append(a)
+    return result
 
 
 def apply_clarifications(days, clarifications):
-    """
-    clarifications: dict of food_key -> qty_label string
-    Applies labels to all matching ingredients across all days.
-    """
     for day in days:
         for meal in day['meals']:
             for ing in meal['ingredients']:
@@ -316,34 +228,109 @@ def apply_clarifications(days, clarifications):
 
 
 def has_fruit(days):
+    return any(is_fruit(ing['food']) for day in days for meal in day['meals'] for ing in meal['ingredients'])
+
+def day_has_fruit(day):
+    return any(is_fruit(ing['food']) for meal in day['meals'] for ing in meal['ingredients'])
+
+
+# ── AI Recipe Generation ──────────────────────────────────────────────────────
+def generate_recipes_ai(days):
+    claude = get_claude()
+
+    meals_text = []
     for day in days:
         for meal in day['meals']:
+            ings = []
             for ing in meal['ingredients']:
-                if is_fruit(ing['food']):
-                    return True
-    return False
+                label = ing.get('qty_label') or (f"{int(ing['qty_g'])}g" if ing['qty_g'] == int(ing['qty_g']) else f"{ing['qty_g']}g")
+                ings.append(f"  - {label} {ing['food']}")
+            meals_text.append(f"Day {day['day_num']} — {meal['meal_label']}:\n" + '\n'.join(ings))
+
+    prompt = """You are a nutrition coach writing a recipe guide for a fitness client.
+
+For each meal below, generate:
+1. A clear, appetising dish name
+2. Concise step-by-step cooking instructions (3-8 steps, written for a client not a chef)
+3. If ingredients are genuinely too unclear to determine a recipe, flag it as unclear
+
+Respond ONLY with valid JSON — no markdown, no code fences, just the JSON object:
+{
+  "meals": [
+    {
+      "day": 1,
+      "meal_label": "Meal 1",
+      "dish_name": "Overnight Oats with Blueberries",
+      "steps": [
+        "Combine oats and almond milk in a jar or bowl and stir well.",
+        "Cover and refrigerate overnight.",
+        "In the morning, top with blueberries and a drizzle of honey.",
+        "Serve with your protein water on the side."
+      ],
+      "unclear": false,
+      "unclear_reason": ""
+    }
+  ]
+}
+
+Rules:
+- Keep steps practical, warm and motivating — written directly to the client
+- Single-item meals (protein water, protein bar, fruit) get 1-2 simple steps
+- Set unclear to true ONLY if you truly cannot determine the dish
+- Never invent ingredients not in the list
+- Do not include nutrition advice or macro info in steps
+
+Meals:
+
+""" + '\n\n'.join(meals_text)
+
+    response = claude.messages.create(
+        model='claude-sonnet-4-20250514',
+        max_tokens=4000,
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+
+    raw = response.content[0].text.strip()
+    raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
+    raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
+    raw = re.sub(r'\s*```$', '', raw)
+
+    ai_data = json.loads(raw)
+    ai_map = {(item['day'], item['meal_label']): item for item in ai_data['meals']}
+
+    unclear_meals = []
+    for day in days:
+        for meal in day['meals']:
+            key = (day['day_num'], meal['meal_label'])
+            if key in ai_map:
+                ai = ai_map[key]
+                meal['dish_name'] = ai.get('dish_name', meal['meal_label'])
+                meal['recipe_steps'] = ai.get('steps', [])
+                if ai.get('unclear'):
+                    unclear_meals.append({
+                        'day': day['day_num'],
+                        'meal_label': meal['meal_label'],
+                        'unclear_reason': ai.get('unclear_reason', ''),
+                        'ingredients': [{'food': i['food'], 'qty_g': i['qty_g']} for i in meal['ingredients']],
+                    })
+
+    return days, unclear_meals
 
 
 # ── PDF Generation ────────────────────────────────────────────────────────────
-
-PW, PH = A4  # 595.28 x 841.89
+PW, PH = A4
 LM, RM = 50.0, 545.28
 CW = RM - LM
-
-# Brand colours (black & white)
 BLACK    = (0.08, 0.08, 0.08)
-WHITE    = (1.0,  1.0,  1.0 )
+WHITE    = (1.0,  1.0,  1.0)
 OFFWHITE = (0.96, 0.96, 0.96)
 MID_GREY = (0.45, 0.45, 0.45)
-LT_GREY  = (0.88, 0.88, 0.88)
 DIVIDER  = (0.80, 0.80, 0.80)
 DARK_CARD= (0.12, 0.12, 0.12)
+HB, H    = 'Helvetica-Bold', 'Helvetica'
 
-HB, H = 'Helvetica-Bold', 'Helvetica'
-
-def pdf_y(top_y): return PH - top_y
-
-def tw(text, font, size): return stringWidth(text, font, size)
+def pdf_y(t): return PH - t
+def tw(t, f, s): return stringWidth(t, f, s)
 
 def draw_text(c, x, top_y, text, font, size, rgb):
     c.saveState()
@@ -353,349 +340,278 @@ def draw_text(c, x, top_y, text, font, size, rgb):
     c.restoreState()
 
 def draw_centred(c, cx, top_y, text, font, size, rgb):
-    w = tw(text, font, size)
-    draw_text(c, cx - w/2, top_y, text, font, size, rgb)
+    draw_text(c, cx - tw(text, font, size)/2, top_y, text, font, size, rgb)
 
-def rounded_rect(c, x, bottom_pdf, w, h, r, fill=None, stroke=None, lw=0):
+def rrect(c, x, bot, w, h, r, fill=None):
     c.saveState()
-    c.setLineWidth(lw)
+    c.setLineWidth(0)
     if fill: c.setFillColorRGB(*fill)
-    if stroke: c.setStrokeColorRGB(*stroke)
     p = c.beginPath()
-    p.moveTo(x+r, bottom_pdf)
-    p.lineTo(x+w-r, bottom_pdf)
-    p.curveTo(x+w, bottom_pdf, x+w, bottom_pdf, x+w, bottom_pdf+r)
-    p.lineTo(x+w, bottom_pdf+h-r)
-    p.curveTo(x+w, bottom_pdf+h, x+w, bottom_pdf+h, x+w-r, bottom_pdf+h)
-    p.lineTo(x+r, bottom_pdf+h)
-    p.curveTo(x, bottom_pdf+h, x, bottom_pdf+h, x, bottom_pdf+h-r)
-    p.lineTo(x, bottom_pdf+r)
-    p.curveTo(x, bottom_pdf, x, bottom_pdf, x+r, bottom_pdf)
+    p.moveTo(x+r, bot); p.lineTo(x+w-r, bot)
+    p.curveTo(x+w, bot, x+w, bot, x+w, bot+r)
+    p.lineTo(x+w, bot+h-r)
+    p.curveTo(x+w, bot+h, x+w, bot+h, x+w-r, bot+h)
+    p.lineTo(x+r, bot+h)
+    p.curveTo(x, bot+h, x, bot+h, x, bot+h-r)
+    p.lineTo(x, bot+r)
+    p.curveTo(x, bot, x, bot, x+r, bot)
     p.close()
-    if fill and stroke: c.drawPath(p, fill=1, stroke=1)
-    elif fill: c.drawPath(p, fill=1, stroke=0)
-    elif stroke: c.drawPath(p, fill=0, stroke=1)
+    c.drawPath(p, fill=1, stroke=0)
     c.restoreState()
 
-def wrap_text(text, font, size, max_w):
+def wrap(text, font, size, max_w):
     words = text.split()
     lines, cur = [], ''
     for word in words:
         test = (cur + ' ' + word).strip()
-        if tw(test, font, size) <= max_w:
-            cur = test
+        if tw(test, font, size) <= max_w: cur = test
         else:
             if cur: lines.append(cur)
             cur = word
     if cur: lines.append(cur)
     return lines
 
+FRUIT_NOTE = ("Note: Any fruit included in today's meals can be eaten as a snack at any point "
+              "throughout the day — it pairs particularly well with Greek yoghurt. "
+              "This won't impact your results.")
+
 def draw_cover(c, client_name, logo_b64):
-    """Draw a full cover page."""
-    # Full black background
     c.setFillColorRGB(*BLACK)
     c.rect(0, 0, PW, PH, fill=1, stroke=0)
-
-    # Logo centred, top third
     if logo_b64:
         try:
             img_data = base64.b64decode(logo_b64)
-            import tempfile, os
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                tmp.write(img_data)
-                tmp_path = tmp.name
-            logo_size = 130
-            logo_x = PW/2 - logo_size/2
-            logo_y_pdf = pdf_y(220 + logo_size)
-            c.drawImage(tmp_path, logo_x, logo_y_pdf,
-                        width=logo_size, height=logo_size, mask='auto')
+                tmp.write(img_data); tmp_path = tmp.name
+            sz = 120
+            c.drawImage(tmp_path, PW/2 - sz/2, pdf_y(220 + sz), width=sz, height=sz, mask='auto')
             os.unlink(tmp_path)
-        except Exception as e:
-            pass
-
-    # "PROJECT GAIN" wordmark
-    draw_centred(c, PW/2, 365, 'PROJECT GAIN', HB, 11, (0.6, 0.6, 0.6))
-
-    # Thin white rule
+        except: pass
+    draw_centred(c, PW/2, 238, 'PROJECT GAIN', HB, 10, (0.5, 0.5, 0.5))
     c.saveState()
-    c.setStrokeColorRGB(1, 1, 1)
-    c.setLineWidth(0.5)
-    c.line(LM + 80, pdf_y(400), RM - 80, pdf_y(400))
+    c.setStrokeColorRGB(0.3, 0.3, 0.3); c.setLineWidth(0.5)
+    c.line(LM+60, pdf_y(276), RM-60, pdf_y(276))
     c.restoreState()
+    draw_centred(c, PW/2, 294, client_name, HB, 30, WHITE)
+    draw_centred(c, PW/2, 340, 'Personalised Meal Plan + Recipe Guide', H, 12, (0.5, 0.5, 0.5))
+    draw_centred(c, PW/2, PH-55, 'projectgainofficial.com', H, 8, (0.3, 0.3, 0.3))
 
-    # Client name — large
-    draw_centred(c, PW/2, 420, client_name, HB, 32, WHITE)
-
-    # Subtitle
-    draw_centred(c, PW/2, 470, 'Personalised Meal Plan', H, 13, (0.55, 0.55, 0.55))
-
-    # Bottom wordmark
-    draw_centred(c, PW/2, PH - 60, 'projectgainofficial.com', H, 8, (0.35, 0.35, 0.35))
-
-
-FRUIT_NOTE = (
-    "Note: Any fruit included in today's meals can be eaten as a snack "
-    "at any point throughout the day — it pairs particularly well with "
-    "Greek yoghurt. This won't impact your results."
-)
-
-def draw_day_header(c, top_y, day_num, total_kcal, total_prot, total_fat, total_carb, include_fruit_note):
-    """Draws day header block. Returns y after block."""
-    box_h = 100.0
-    rounded_rect(c, LM, pdf_y(top_y + box_h), CW, box_h, r=6, fill=BLACK)
-
-    # Day title
-    draw_centred(c, PW/2, top_y + 16, f"Day {day_num}", HB, 22, WHITE)
-
-    # Macro pill
-    pill_w, pill_h = 340.0, 26.0
-    pill_x = PW/2 - pill_w/2
-    pill_top = top_y + 46
-    rounded_rect(c, pill_x, pdf_y(pill_top + pill_h), pill_w, pill_h, r=5,
-                 fill=(0.22, 0.22, 0.22))
-
-    macro_str = f"{total_kcal:,} kcal  ·  {total_prot}g Protein  ·  {total_fat}g Fats  ·  {total_carb}g Carbs"
-    draw_centred(c, PW/2, pill_top + 8, macro_str, HB, 8.5, WHITE)
-
-    y = top_y + box_h + 14
-
-    # Fruit note
-    if include_fruit_note:
-        note_lines = wrap_text(FRUIT_NOTE, H, 8.5, CW - 20)
-        note_h = len(note_lines) * 12 + 14
-        rounded_rect(c, LM, pdf_y(y + note_h), CW, note_h, r=4, fill=OFFWHITE)
-        # Left accent bar
-        rounded_rect(c, LM, pdf_y(y + note_h), 3, note_h, r=2, fill=DARK_CARD)
-        ny = y + 7
-        for line in note_lines:
-            draw_text(c, LM + 10, ny, line, H, 8.5, MID_GREY)
-            ny += 12
-        y += note_h + 10
-
+def draw_day_header(c, top_y, day_num, kcal, prot, fat, carb, fruit_note):
+    box_h = 96.0
+    rrect(c, LM, pdf_y(top_y+box_h), CW, box_h, r=6, fill=BLACK)
+    draw_centred(c, PW/2, top_y+14, f'Day {day_num}', HB, 22, WHITE)
+    pill_w, pill_h, pill_top = 360.0, 26.0, top_y+44
+    rrect(c, PW/2-pill_w/2, pdf_y(pill_top+pill_h), pill_w, pill_h, r=5, fill=(0.2, 0.2, 0.2))
+    draw_centred(c, PW/2, pill_top+8, f'{kcal:,} kcal  ·  {prot}g Protein  ·  {fat}g Fats  ·  {carb}g Carbs', HB, 8.5, WHITE)
+    y = top_y + box_h + 12
+    if fruit_note:
+        lines = wrap(FRUIT_NOTE, H, 8.5, CW-20)
+        note_h = len(lines)*12+14
+        rrect(c, LM, pdf_y(y+note_h), CW, note_h, r=4, fill=OFFWHITE)
+        rrect(c, LM, pdf_y(y+note_h), 3, note_h, r=2, fill=DARK_CARD)
+        ny = y+7
+        for line in lines:
+            draw_text(c, LM+12, ny, line, H, 8.5, MID_GREY); ny += 12
+        y += note_h+10
     return y
 
-
-def draw_meal_card(c, top_y, meal_label, kcal, prot, fat, carb, ingredients):
-    """Draw one meal card. Returns y after card."""
-    # Header bar — dark
-    hdr_h = 40.0
-    rounded_rect(c, LM, pdf_y(top_y + hdr_h), CW, hdr_h, r=6, fill=DARK_CARD)
-
-    # Badge
-    badge_w, badge_h = 52.0, 16.0
-    badge_x = LM + 10
-    badge_top = top_y + 12
-    rounded_rect(c, badge_x, pdf_y(badge_top + badge_h), badge_w, badge_h, r=3,
-                 fill=(0.28, 0.28, 0.28))
-    draw_centred(c, badge_x + badge_w/2, badge_top + 4, meal_label.upper(), HB, 7, WHITE)
-
-    # Dish title placeholder (just meal label for now — recipe names come from Claude)
-    # Actually we just show the meal label as-is for simplicity
-    # The meal card shows ingredients/method — no dish name since Excel doesn't have one
+def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingredients, steps):
+    hdr_h = 44.0
+    rrect(c, LM, pdf_y(top_y+hdr_h), CW, hdr_h, r=6, fill=DARK_CARD)
+    bw, bh, bx, bt = 52.0, 16.0, LM+10, top_y+14
+    rrect(c, bx, pdf_y(bt+bh), bw, bh, r=3, fill=(0.28, 0.28, 0.28))
+    draw_centred(c, bx+bw/2, bt+4, meal_label.upper(), HB, 7, WHITE)
+    if dish_name:
+        # Truncate dish name if too wide
+        max_dish_w = RM - (bx + bw + 20)
+        dish_display = dish_name
+        while dish_display and tw(dish_display, HB, 13) > max_dish_w:
+            dish_display = dish_display[:-1]
+        if dish_display != dish_name: dish_display += '...'
+        draw_text(c, bx+bw+12, top_y+15, dish_display, HB, 13, WHITE)
 
     y = top_y + hdr_h
-
-    # Macro row — light grey bg
     macro_h = 38.0
-    rounded_rect(c, LM, pdf_y(y + macro_h), CW, macro_h, r=0, fill=OFFWHITE)
-
-    divs = [LM + CW*0.25, LM + CW*0.5, LM + CW*0.75]
-    col_centres = [
-        LM + CW*0.125,
-        LM + CW*0.375,
-        LM + CW*0.625,
-        LM + CW*0.875,
-    ]
-    vals = [f"{kcal} kcal", f"{prot}g", f"{fat}g", f"{carb}g"]
-    labs = ["Calories", "Protein", "Fats", "Carbs"]
-
+    rrect(c, LM, pdf_y(y+macro_h), CW, macro_h, r=0, fill=OFFWHITE)
+    divs = [LM+CW*0.25, LM+CW*0.5, LM+CW*0.75]
+    centres = [LM+CW*0.125, LM+CW*0.375, LM+CW*0.625, LM+CW*0.875]
     c.saveState()
-    c.setStrokeColorRGB(*DIVIDER)
-    c.setLineWidth(0.4)
-    for dx in divs:
-        c.line(dx, pdf_y(y + 8), dx, pdf_y(y + 30))
+    c.setStrokeColorRGB(*DIVIDER); c.setLineWidth(0.4)
+    for dx in divs: c.line(dx, pdf_y(y+8), dx, pdf_y(y+30))
     c.restoreState()
-
-    for cx, val, lab in zip(col_centres, vals, labs):
-        draw_centred(c, cx, y + 7, val, HB, 11, BLACK)
-        draw_centred(c, cx, y + 20, lab, H, 7, MID_GREY)
-
+    for cx, val, lab in zip(centres, [f'{kcal} kcal', f'{prot}g', f'{fat}g', f'{carb}g'], ['Calories','Protein','Fats','Carbs']):
+        draw_centred(c, cx, y+7, val, HB, 11, BLACK)
+        draw_centred(c, cx, y+20, lab, H, 7, MID_GREY)
     y += macro_h + 18
 
-    # INGREDIENTS
     draw_text(c, LM, y, 'INGREDIENTS', HB, 8.5, BLACK)
     y += 14
-
-    qty_x = LM + 8
     for ing in ingredients:
-        qty_g = ing['qty_g']
-        food  = ing['food']
         label = ing.get('qty_label')
-
-        # Format quantity string
         if label:
-            # Clarified ingredient: show the label as qty, food name as-is after
-            qty_str = label
-            draw_text(c, qty_x, y, qty_str, HB, 9.5, BLACK)
-            # Don't repeat the food name — the label already contains context
+            draw_text(c, LM+8, y, label, HB, 9.5, BLACK)
         else:
-            # Standard ingredient: bold qty + regular food name
-            if qty_g == int(qty_g):
-                qty_str = f"{int(qty_g)}g"
-            else:
-                qty_str = f"{qty_g}g"
-            draw_text(c, qty_x, y, qty_str, HB, 9.5, BLACK)
-            name_x = qty_x + tw(qty_str, HB, 9.5) + 5.5
-            draw_text(c, name_x, y, food, H, 9.5, BLACK)
+            qty_g = ing['qty_g']
+            qs = f"{int(qty_g)}g" if qty_g == int(qty_g) else f"{qty_g}g"
+            draw_text(c, LM+8, y, qs, HB, 9.5, BLACK)
+            draw_text(c, LM+8+tw(qs, HB, 9.5)+5.5, y, ing['food'], H, 9.5, BLACK)
         y += 14
 
-    # Divider
     y += 6
-    c.saveState()
-    c.setStrokeColorRGB(*DIVIDER)
-    c.setLineWidth(0.4)
-    c.line(LM, pdf_y(y), RM, pdf_y(y))
-    c.restoreState()
+    c.saveState(); c.setStrokeColorRGB(*DIVIDER); c.setLineWidth(0.4)
+    c.line(LM, pdf_y(y), RM, pdf_y(y)); c.restoreState()
     y += 8
 
+    if steps:
+        draw_text(c, LM, y, 'METHOD', HB, 8.5, BLACK)
+        y += 14
+        max_w = RM - (LM+24)
+        for i, step in enumerate(steps, 1):
+            draw_text(c, LM+8, y, f'{i}.', HB, 9.5, BLACK)
+            lines = wrap(step, H, 9.5, max_w)
+            for line in lines:
+                draw_text(c, LM+24, y, line, H, 9.5, BLACK); y += 13
+            y += 2
+    y += 12
     return y
 
-
-def generate_pdf(client_name, days, logo_b64):
-    """Generate the full PDF. Returns bytes."""
+def generate_pdf_doc(client_name, days, logo_b64):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
-    c.setTitle(f"{client_name} — Meal Plan")
+    c.setTitle(f"{client_name} — Meal Plan + Recipe Guide")
     c.setAuthor("Project GAIN")
-
-    has_any_fruit = has_fruit(days)
-
-    # Cover page
     draw_cover(c, client_name, logo_b64)
     c.showPage()
-
-    # Day pages
+    any_fruit = has_fruit(days)
     for day in days:
-        # Check if this day has fruit
-        day_has_fruit = has_any_fruit and any(
-            is_fruit(ing['food'])
-            for meal in day['meals']
-            for ing in meal['ingredients']
-        )
-
         y = 48.0
-        y = draw_day_header(c, y,
-                            day['day_num'],
-                            day['total_kcal'], day['total_prot'],
-                            day['total_fat'],  day['total_carb'],
-                            include_fruit_note=day_has_fruit)
-
+        y = draw_day_header(c, y, day['day_num'],
+                            day['total_kcal'], day['total_prot'], day['total_fat'], day['total_carb'],
+                            fruit_note=any_fruit and day_has_fruit(day))
         for meal in day['meals']:
-            # Estimate card height
-            n_ing = len(meal['ingredients'])
-            ing_h = 14 + n_ing * 14 + 14
-            macro_h = 38
-            hdr_h = 40
-            card_h = hdr_h + macro_h + 18 + ing_h + 20
-
+            steps = meal.get('recipe_steps', [])
+            n_step_lines = sum(len(wrap(s, H, 9.5, RM-(LM+24))) for s in steps)
+            card_h = 44+38+18+14+len(meal['ingredients'])*14+20+22+n_step_lines*13+len(steps)*2+20
             if y + card_h > PH - 40:
-                c.showPage()
-                y = 48.0
-
-            y = draw_meal_card(
-                c, y,
-                meal['meal_label'],
-                meal['kcal'], meal['prot'], meal['fat'], meal['carb'],
-                meal['ingredients'],
-            )
-            y += 16
-
+                c.showPage(); y = 48.0
+            y = draw_meal_card(c, y, meal['meal_label'], meal.get('dish_name',''),
+                               meal['kcal'], meal['prot'], meal['fat'], meal['carb'],
+                               meal['ingredients'], steps)
+            y += 14
         c.showPage()
-
-    c.save()
-    buf.seek(0)
+    c.save(); buf.seek(0)
     return buf.read()
 
 
 # ── API Routes ────────────────────────────────────────────────────────────────
 
-# Store in-memory between requests (simple; stateless via session token)
-_sessions = {}
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok'})
+
 
 @app.route('/upload', methods=['POST'])
 def upload():
-    """Step 1: Upload Excel, get back ambiguous ingredients."""
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
-
     f = request.files['file']
     if not f.filename.endswith(('.xlsx', '.xls')):
         return jsonify({'error': 'Please upload an Excel file (.xlsx)'}), 400
-
     file_bytes = f.read()
-    filename = f.filename
-
     try:
-        client_name, days = parse_excel(file_bytes, filename)
+        client_name, days = parse_excel(file_bytes, f.filename)
     except Exception as e:
-        return jsonify({'error': f'Could not parse Excel file: {str(e)}'}), 400
+        return jsonify({'error': f'Could not parse file: {str(e)}'}), 400
 
-    ambiguous = find_ambiguous_ingredients(days)
-
-    # Store session
+    ambiguous = find_ambiguous(days)
     import uuid
-    session_id = str(uuid.uuid4())
-    _sessions[session_id] = {
-        'client_name': client_name,
-        'days': days,
-        'file_bytes': file_bytes,
-        'filename': filename,
-    }
-
-    return jsonify({
-        'session_id': session_id,
-        'client_name': client_name,
-        'day_count': len(days),
-        'ambiguous': ambiguous,
-    })
+    sid = str(uuid.uuid4())
+    _sessions[sid] = {'client_name': client_name, 'days': days}
+    return jsonify({'session_id': sid, 'client_name': client_name, 'day_count': len(days), 'ambiguous': ambiguous})
 
 
-@app.route('/generate', methods=['POST'])
-def generate():
-    """Step 2: Receive clarifications, generate PDF."""
+@app.route('/clarify', methods=['POST'])
+def clarify():
     data = request.get_json()
-    session_id    = data.get('session_id')
-    clarifications = data.get('clarifications', {})  # {food_key: qty_label}
-    logo_b64      = data.get('logo_b64', '')
+    sid = data.get('session_id')
+    if sid not in _sessions:
+        return jsonify({'error': 'Session expired. Please re-upload.'}), 400
 
-    if session_id not in _sessions:
-        return jsonify({'error': 'Session expired. Please re-upload the file.'}), 400
-
-    sess = _sessions[session_id]
-    client_name = sess['client_name']
-    days = sess['days']
-
-    apply_clarifications(days, clarifications)
+    sess = _sessions[sid]
+    apply_clarifications(sess['days'], data.get('clarifications', {}))
 
     try:
-        pdf_bytes = generate_pdf(client_name, days, logo_b64)
+        days, unclear_meals = generate_recipes_ai(sess['days'])
     except Exception as e:
         import traceback
-        return jsonify({'error': f'PDF generation failed: {str(e)}', 'trace': traceback.format_exc()}), 500
+        return jsonify({'error': f'Recipe generation failed: {str(e)}', 'detail': traceback.format_exc()}), 500
 
-    # Clean up session
-    del _sessions[session_id]
+    sess['days'] = days
 
-    pdf_b64 = base64.b64encode(pdf_bytes).decode()
-    return jsonify({
-        'pdf_b64': pdf_b64,
-        'filename': f"{client_name.replace(' ', '_')}_Meal_Plan.pdf",
-    })
+    review_days = []
+    for day in days:
+        review_days.append({
+            'day_num': day['day_num'],
+            'total_kcal': day['total_kcal'], 'total_prot': day['total_prot'],
+            'total_fat': day['total_fat'],   'total_carb': day['total_carb'],
+            'meals': [{
+                'meal_label': m['meal_label'],
+                'dish_name':  m.get('dish_name', ''),
+                'kcal': m['kcal'], 'prot': m['prot'], 'fat': m['fat'], 'carb': m['carb'],
+                'ingredients': [{'food': i['food'], 'qty_g': i['qty_g'],
+                                 'qty_label': i.get('qty_label'), 'excel_qty_g': i.get('excel_qty_g', i['qty_g'])} for i in m['ingredients']],
+                'recipe_steps': m.get('recipe_steps', []),
+                'needs_clarification': m.get('needs_clarification', False),
+            } for m in day['meals']],
+        })
+
+    return jsonify({'session_id': sid, 'review_days': review_days, 'unclear_meals': unclear_meals})
 
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'ok'})
+@app.route('/generate-pdf', methods=['POST'])
+def generate_pdf_route():
+    data = request.get_json()
+    sid = data.get('session_id')
+    approved_days = data.get('approved_days', [])
+    logo_b64 = data.get('logo_b64', '')
+
+    if sid not in _sessions:
+        return jsonify({'error': 'Session expired. Please re-upload.'}), 400
+
+    sess = _sessions[sid]
+    days = sess['days']
+    client_name = sess['client_name']
+
+    # Merge approved edits + verify quantities
+    qty_issues = []
+    for i, day in enumerate(days):
+        if i >= len(approved_days): continue
+        adv = approved_days[i]
+        for j, meal in enumerate(day['meals']):
+            if j >= len(adv.get('meals', [])): continue
+            am = adv['meals'][j]
+            meal['dish_name']    = am.get('dish_name', meal.get('dish_name', ''))
+            meal['recipe_steps'] = am.get('recipe_steps', meal.get('recipe_steps', []))
+            for k, ing in enumerate(meal['ingredients']):
+                excel_qty = ing.get('excel_qty_g', ing['qty_g'])
+                if k < len(am.get('ingredients', [])):
+                    sub_qty = float(am['ingredients'][k].get('qty_g', ing['qty_g']))
+                    if abs(excel_qty - sub_qty) > 0.01:
+                        qty_issues.append({'day': day['day_num'], 'meal': meal['meal_label'],
+                                           'food': ing['food'], 'excel_qty': excel_qty, 'submitted_qty': sub_qty})
+
+    if qty_issues:
+        return jsonify({'qty_issues': qty_issues, 'error': 'Quantity mismatch detected — please review.'}), 422
+
+    try:
+        pdf_bytes = generate_pdf_doc(client_name, days, logo_b64)
+    except Exception as e:
+        import traceback
+        return jsonify({'error': f'PDF failed: {str(e)}', 'detail': traceback.format_exc()}), 500
+
+    del _sessions[sid]
+    return jsonify({'pdf_b64': base64.b64encode(pdf_bytes).decode(),
+                    'filename': f"{client_name.replace(' ', '_')}_Meal_Plan.pdf"})
 
 
 if __name__ == '__main__':
