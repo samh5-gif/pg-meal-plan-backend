@@ -129,6 +129,26 @@ _SIZE_DATA = {
     'potato':       (175, 'medium potato','a medium potato weighs around 150-200g'),
 }
 
+# ── Persistent size suggestion cache ─────────────────────────────────────────
+_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'size_cache.json')
+
+def _load_cache():
+    try:
+        with open(_CACHE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_cache(cache):
+    try:
+        with open(_CACHE_FILE, 'w') as f:
+            json.dump(cache, f, indent=2)
+    except Exception:
+        pass
+
+_size_cache = _load_cache()
+
+
 def lookup_size_suggestions(ambiguous_items):
     """
     Instant size suggestions using known food weight data.
@@ -170,8 +190,83 @@ def lookup_size_suggestions(ambiguous_items):
             item['suggestion'] = f"{qty_int}g = {desc} ({reference})"
             item['short'] = short
         else:
-            item['suggestion'] = f"{qty_int}g — please confirm the practical size"
+            # Mark for AI fallback
+            item['suggestion'] = None
             item['short'] = ''
+
+    # For items not in the hardcoded table, check cache first then fall back to Claude
+    unknown = [i for i in ambiguous_items if i['suggestion'] is None]
+
+    if unknown:
+        # Step 1: fill from cache where possible
+        still_unknown = []
+        for item in unknown:
+            cache_key = f"{item['food'].lower().strip()}:{int(item['qty_g']) if item['qty_g']==int(item['qty_g']) else item['qty_g']}"
+            if cache_key in _size_cache:
+                cached = _size_cache[cache_key]
+                item['suggestion'] = cached['suggestion']
+                item['short']      = cached['short']
+            else:
+                still_unknown.append(item)
+
+        # Step 2: call Claude only for items not in cache
+        if still_unknown:
+            try:
+                items_text = '\n'.join(
+                    f"- {i['food']}: {int(i['qty_g']) if i['qty_g']==int(i['qty_g']) else i['qty_g']}g"
+                    for i in still_unknown
+                )
+                prompt = (
+                    "You are a nutrition expert. For each ingredient and gram weight below, "
+                    "give the most accurate practical size equivalent in one short sentence.\n"
+                    "Format: Xg = [description] ([brief weight reference])\n"
+                    "Also give a \"short\" field: just the description, no grams.\n\n"
+                    "Respond ONLY as valid JSON:\n"
+                    '{"suggestions": [{"food": "X", "suggestion": "50g = 1 small egg (large eggs weigh 63-73g)", "short": "1 small egg"}]}\n\n'
+                    f"Ingredients:\n{items_text}"
+                )
+                resp = get_claude().messages.create(
+                    model='claude-haiku-4-5-20251001',
+                    max_tokens=400,
+                    messages=[{'role': 'user', 'content': prompt}]
+                )
+                raw = resp.content[0].text.strip()
+                raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
+                raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
+                raw = re.sub(r'\s*```$', '', raw)
+                data = json.loads(raw)
+
+                sugg_map = {}
+                for s in data.get('suggestions', []):
+                    k = s['food'].lower().strip()
+                    sugg_map[k] = s
+                    sugg_map[re.sub(r'\s*\([^)]+\)', '', k).strip()] = s
+
+                cache_updated = False
+                for item in still_unknown:
+                    k  = item['food'].lower().strip()
+                    ck = re.sub(r'\s*\([^)]+\)', '', k).strip()
+                    match = sugg_map.get(k) or sugg_map.get(ck)
+                    qty_int = int(item['qty_g']) if item['qty_g']==int(item['qty_g']) else item['qty_g']
+                    if match:
+                        item['suggestion'] = match.get('suggestion', '')
+                        item['short']      = match.get('short', '')
+                        # Save to cache keyed by food + qty
+                        cache_key = f"{k}:{qty_int}"
+                        _size_cache[cache_key] = {'suggestion': item['suggestion'], 'short': item['short']}
+                        cache_updated = True
+                    else:
+                        item['suggestion'] = f"{qty_int}g — please confirm the practical size"
+                        item['short'] = ''
+
+                if cache_updated:
+                    _save_cache(_size_cache)
+
+            except Exception:
+                for item in still_unknown:
+                    qty_int = int(item['qty_g']) if item['qty_g']==int(item['qty_g']) else item['qty_g']
+                    item['suggestion'] = f"{qty_int}g — please confirm the practical size"
+                    item['short'] = ''
 
     return ambiguous_items
 
