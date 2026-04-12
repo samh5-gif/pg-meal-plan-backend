@@ -12,6 +12,23 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase.pdfmetrics import stringWidth
 import anthropic
 
+# ── Register Inter fonts for PDF ─────────────────────────────────────────────
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+def _register_fonts():
+    font_dir = os.path.join(os.path.dirname(__file__), 'fonts')
+    try:
+        pdfmetrics.registerFont(TTFont('Inter', os.path.join(font_dir, 'Inter-Regular.ttf')))
+        pdfmetrics.registerFont(TTFont('Inter-Bold', os.path.join(font_dir, 'Inter-Bold.ttf')))
+        pdfmetrics.registerFont(TTFont('Inter-ExtraBold', os.path.join(font_dir, 'Inter-ExtraBold.ttf')))
+        pdfmetrics.registerFontFamily('Inter', normal='Inter', bold='Inter-Bold')
+        return True
+    except Exception as e:
+        return False
+
+INTER_AVAILABLE = _register_fonts()
+
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -426,7 +443,10 @@ OFFWHITE = (0.96, 0.96, 0.96)
 MID_GREY = (0.45, 0.45, 0.45)
 DIVIDER  = (0.80, 0.80, 0.80)
 DARK_CARD= (0.12, 0.12, 0.12)
-HB, H    = 'Helvetica-Bold', 'Helvetica'
+# Use Inter if available, fall back to Helvetica
+HB = 'Inter-Bold' if INTER_AVAILABLE else 'Helvetica-Bold'
+HXB = 'Inter-ExtraBold' if INTER_AVAILABLE else 'Helvetica-Bold'
+H  = 'Inter' if INTER_AVAILABLE else 'Helvetica'
 
 def pdf_y(t): return PH - t
 def tw(t, f, s): return stringWidth(t, f, s)
@@ -505,7 +525,7 @@ def draw_cover(c, client_name, logo_b64):
     c.restoreState()
 
     # Client name — 16pt below rule
-    draw_centred(c, PW/2, rule_y + 14, client_name, HB, 30, WHITE)
+    draw_centred(c, PW/2, rule_y + 14, client_name, HXB, 30, WHITE)
 
     # Subtitle — 20pt below name
     draw_centred(c, PW/2, rule_y + 62, 'Personalised Meal Plan + Recipe Guide', H, 11, (0.45, 0.45, 0.45))
@@ -516,7 +536,7 @@ def draw_cover(c, client_name, logo_b64):
 def draw_day_header(c, top_y, day_num, kcal, prot, fat, carb, fruit_note):
     box_h = 96.0
     rrect(c, LM, pdf_y(top_y+box_h), CW, box_h, r=6, fill=BLACK)
-    draw_centred(c, PW/2, top_y+14, f'Day {day_num}', HB, 22, WHITE)
+    draw_centred(c, PW/2, top_y+14, f'Day {day_num}', HXB, 22, WHITE)
     pill_w, pill_h, pill_top = 360.0, 26.0, top_y+44
     rrect(c, PW/2-pill_w/2, pdf_y(pill_top+pill_h), pill_w, pill_h, r=5, fill=(0.2, 0.2, 0.2))
     draw_centred(c, PW/2, pill_top+8, f'{kcal:,} kcal  ·  {prot}g Protein  ·  {fat}g Fats  ·  {carb}g Carbs', HB, 8.5, WHITE)
@@ -545,7 +565,7 @@ def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingre
         while dish_display and tw(dish_display, HB, 13) > max_dish_w:
             dish_display = dish_display[:-1]
         if dish_display != dish_name: dish_display += '...'
-        draw_text(c, bx+bw+12, top_y+15, dish_display, HB, 13, WHITE)
+        draw_text(c, bx+bw+12, top_y+15, dish_display, HXB, 13, WHITE)
 
     y = top_y + hdr_h
     macro_h = 38.0
