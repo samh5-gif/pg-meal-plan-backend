@@ -39,53 +39,121 @@ _sessions = {}
 # ── Ambiguous ingredient detection ───────────────────────────────────────────
 EXCLUSIONS = ['egg white', 'protein water', 'egg powder', 'passionfruit']
 
-AMBIGUOUS = [
-    # Eggs — sized at ~60g each for large, ~50g medium
-    (r'\bboiled eggs?\b',    'boiled egg',    'Based on {qty}g: we recommend {n} large boiled egg{s}. A large egg is ~60g.'),
-    (r'\bscrambled eggs?\b', 'scrambled egg', 'Based on {qty}g: we recommend {n} large egg{s}, scrambled. A large egg is ~60g.'),
-    (r'\bfried eggs?\b',     'fried egg',     'Based on {qty}g: we recommend {n} large fried egg{s}. A large egg is ~60g.'),
-    (r'\bpoached eggs?\b',   'poached egg',   'Based on {qty}g: we recommend {n} large poached egg{s}. A large egg is ~60g.'),
-    (r'^eggs?$',             'egg',           'Based on {qty}g: we recommend {n} large egg{s}. A large egg is ~60g.'),
-    # Fruit — specific size guidance per fruit
-    (r'\bapple\b',    'apple',       'Based on {qty}g: we recommend 1 large apple. A medium apple is ~130g, large is ~180g.'),
-    (r'\bbanana\b',   'banana',      'Based on {qty}g: we recommend 1 medium banana. A small banana is ~80g, medium is ~120g.'),
-    (r'\bpeach\b',    'peach',       'Based on {qty}g: we recommend 1 large peach. A medium peach is ~150g, large is ~200g.'),
-    (r'\bplum\b',     'plum',        'Based on {qty}g: we recommend 1 large plum. A medium plum is ~65g, large is ~85g.'),
-    (r'\borange\b',   'orange',      'Based on {qty}g: we recommend 1 large orange. A medium orange is ~130g, large is ~185g.'),
-    (r'\bpear\b',     'pear',        'Based on {qty}g: we recommend 1 medium pear. A medium pear is ~160g.'),
-    (r'^mango\b',      'mango',       'Based on {qty}g: we recommend half a large mango. A whole large mango is ~350g.'),
-    (r'\bkiwi\b',     'kiwi',        'Based on {qty}g: we recommend {n} kiwi{s}. A standard kiwi is ~70g.'),
-    (r'\bgrapes?\b',  'grapes',      'Based on {qty}g: we recommend a small bunch of grapes (~15-18 grapes).'),
-    # Veg
-    (r'\bcarrots?\b', 'carrot',      'Based on {qty}g: we recommend 1 medium carrot. A medium carrot is ~80g.'),
-    (r'\bcourgette\b','courgette',   'Based on {qty}g: we recommend half a medium courgette. A whole medium courgette is ~200g.'),
-    (r'\bavocado\b',  'avocado',     'Based on {qty}g: we recommend half a medium avocado. A whole medium avocado is ~150g.'),
-    (r'\bonion\b',    'onion',       'Based on {qty}g: we recommend half a medium onion. A whole medium onion is ~150g.'),
-    (r'\bsweet potato\b', 'sweet potato', 'Based on {qty}g: we recommend 1 medium sweet potato. A medium one is ~130g.'),
-    (r'\bpotato\b',   'potato',      'Based on {qty}g: we recommend 1 medium potato. A medium potato is ~150g.'),
+# Patterns that flag an ingredient as needing size clarification
+AMBIGUOUS_PATTERNS = [
+    r'\bboiled eggs?\b',
+    r'\bscrambled eggs?\b',
+    r'\bfried eggs?\b',
+    r'\bpoached eggs?\b',
+    r'^eggs?$',
+    r'\bapple\b',
+    r'\bbanana\b',
+    r'\bpeach\b',
+    r'\bplum\b',
+    r'\borange\b',
+    r'\bpear\b',
+    r'^mango\b',
+    r'\bkiwi\b',
+    r'\bgrapes?\b',
+    r'\bcarrots?\b',
+    r'\bcourgette\b',
+    r'\bavocado\b',
+    r'\bonion\b',
+    r'\bsweet potato\b',
+    r'\bpotato\b',
 ]
 
-def size_suggestion(tpl, qty_g):
-    qty = int(qty_g) if qty_g == int(qty_g) else qty_g
-    n = max(1, round(qty_g / 60))
-    s = 's' if n > 1 else ''
-    return tpl.format(qty=qty, n=n, s=s)
-
 def check_ambiguous(qty_g, food_name):
+    """Flag ingredient as ambiguous if it matches any pattern. Suggestion is filled in later by AI web search."""
     name_lower = food_name.lower()
     for excl in EXCLUSIONS:
         if excl in name_lower:
             return None
-    for pattern, label, suggestion_tpl in AMBIGUOUS:
+    for pattern in AMBIGUOUS_PATTERNS:
         if re.search(pattern, name_lower, re.IGNORECASE):
             return {
                 'food': food_name,
                 'qty_g': qty_g,
-                'label': label,
                 'key': name_lower.strip(),
-                'suggestion': size_suggestion(suggestion_tpl, qty_g),
+                'suggestion': None,  # filled in by lookup_size_suggestions()
             }
     return None
+
+
+def lookup_size_suggestions(ambiguous_items):
+    """
+    Use Claude with web_search tool to look up real size equivalents
+    for each ambiguous ingredient based on its gram weight.
+    Returns updated list with 'suggestion' filled in.
+    """
+    if not ambiguous_items:
+        return ambiguous_items
+
+    claude = get_claude()
+
+    # Build one prompt asking about all items at once
+    items_text = '\n'.join(
+        f"- {item['food']}: {int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g"
+        for item in ambiguous_items
+    )
+
+    prompt = f"""You are helping a nutrition coach create a recipe guide. 
+For each ingredient below, search the web to find what that gram weight equates to in practical, everyday terms (e.g. "1 large egg", "1 medium apple", "half a medium courgette").
+
+Use web search to find accurate size equivalents for each item. Base your answer on the actual gram weight given.
+
+For each item give a single clear sentence recommendation in this format:
+"Based on Xg: [practical size description]. ([brief size reference])."
+
+Example: "Based on 120g: 2 large eggs. (A large egg is approximately 60g.)"
+Example: "Based on 80g: 1 medium carrot. (A medium carrot weighs around 75-85g.)"
+
+Ingredients to look up:
+{items_text}
+
+Respond ONLY with valid JSON — no markdown, just the object:
+{{
+  "suggestions": [
+    {{"food": "Eggs", "suggestion": "Based on 120g: 2 large eggs. (A large egg is approximately 60g.)"}},
+    ...
+  ]
+}}"""
+
+    response = claude.messages.create(
+        model='claude-sonnet-4-20250514',
+        max_tokens=1000,
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+
+    # Extract text response (after tool use)
+    raw = ''
+    for block in response.content:
+        if hasattr(block, 'text'):
+            raw += block.text
+
+    raw = raw.strip()
+    raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
+    raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
+    raw = re.sub(r'\s*```$', '', raw)
+
+    try:
+        data = json.loads(raw)
+        sugg_map = {s['food'].lower().strip(): s['suggestion'] for s in data.get('suggestions', [])}
+        for item in ambiguous_items:
+            key = item['food'].lower().strip()
+            if key in sugg_map:
+                item['suggestion'] = sugg_map[key]
+            else:
+                # Fallback if AI didn't cover this one
+                item['suggestion'] = f"Listed as {int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g — please confirm the practical size for the client."
+    except Exception:
+        # If parsing fails, leave suggestions as fallback text
+        for item in ambiguous_items:
+            if not item['suggestion']:
+                item['suggestion'] = f"Listed as {int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g — please confirm the practical size for the client."
+
+    return ambiguous_items
 
 def is_fruit(food_name):
     fruits = {'apple','banana','peach','plum','orange','pear','mango','kiwi',
@@ -524,6 +592,13 @@ def upload():
         return jsonify({'error': f'Could not parse file: {str(e)}'}), 400
 
     ambiguous = find_ambiguous(days)
+
+    # Use AI + web search to get accurate size suggestions for each ambiguous ingredient
+    try:
+        ambiguous = lookup_size_suggestions(ambiguous)
+    except Exception:
+        pass  # Suggestions will show fallback text — not fatal
+
     import uuid
     sid = str(uuid.uuid4())
     _sessions[sid] = {'client_name': client_name, 'days': days}
