@@ -17,15 +17,27 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 def _register_fonts():
-    font_dir = os.path.join(os.path.dirname(__file__), 'fonts')
-    try:
-        pdfmetrics.registerFont(TTFont('Inter', os.path.join(font_dir, 'Inter-Regular.ttf')))
-        pdfmetrics.registerFont(TTFont('Inter-Bold', os.path.join(font_dir, 'Inter-Bold.ttf')))
-        pdfmetrics.registerFont(TTFont('Inter-ExtraBold', os.path.join(font_dir, 'Inter-ExtraBold.ttf')))
-        pdfmetrics.registerFontFamily('Inter', normal='Inter', bold='Inter-Bold')
-        return True
-    except Exception as e:
-        return False
+    # Try multiple possible font locations
+    possible_dirs = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts'),
+        os.path.join(os.getcwd(), 'fonts'),
+        '/opt/render/project/src/fonts',
+    ]
+    for font_dir in possible_dirs:
+        try:
+            r = os.path.join(font_dir, 'Inter-Regular.ttf')
+            b = os.path.join(font_dir, 'Inter-Bold.ttf')
+            xb = os.path.join(font_dir, 'Inter-ExtraBold.ttf')
+            if not all(os.path.exists(f) for f in [r, b, xb]):
+                continue
+            pdfmetrics.registerFont(TTFont('Inter', r))
+            pdfmetrics.registerFont(TTFont('Inter-Bold', b))
+            pdfmetrics.registerFont(TTFont('Inter-ExtraBold', xb))
+            pdfmetrics.registerFontFamily('Inter', normal='Inter', bold='Inter-Bold')
+            return True
+        except Exception:
+            continue
+    return False  # Falls back to Helvetica gracefully
 
 INTER_AVAILABLE = _register_fonts()
 
@@ -99,84 +111,54 @@ def check_ambiguous(qty_g, food_name):
 
 def lookup_size_suggestions(ambiguous_items):
     """
-    For each ambiguous ingredient, perform a real web search to find
-    accurate size equivalents for that specific gram weight, then use
-    Claude to synthesise a clean, specific suggestion from the results.
+    Use Claude to determine accurate practical size equivalents for each
+    ambiguous ingredient based on its gram weight.
+    Claude has accurate food weight knowledge from nutrition databases.
     """
     if not ambiguous_items:
         return ambiguous_items
 
-    try:
-        from ddgs import DDGS
-    except ImportError:
-        for item in ambiguous_items:
-            item['suggestion'] = f"{int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g — confirm practical size"
-            item['short'] = ''
-        return ambiguous_items
-
     claude = get_claude()
 
-    # Search for each ingredient individually to get real data
-    search_results = {}
-    ddgs = DDGS()
-    for item in ambiguous_items:
-        food_clean = re.sub(r'\s*\([^)]+\)', '', item['food']).strip()
-        qty = int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']
-        query = f"{qty}g {food_clean} size equivalent medium large small UK"
-        try:
-            results = ddgs.text(query, max_results=4) or []
-            snippets = ' | '.join(
-                r.get('body', '')[:200] for r in results[:3] if r.get('body')
-            )
-            search_results[item['food']] = {
-                'query': query,
-                'snippets': snippets or 'No results found',
-                'qty': qty,
-                'food_clean': food_clean,
-            }
-        except Exception:
-            search_results[item['food']] = {
-                'query': query,
-                'snippets': 'Search unavailable',
-                'qty': qty,
-                'food_clean': food_clean,
-            }
+    items_text = '\n'.join(
+        f"- {item['food']}: {int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g"
+        for item in ambiguous_items
+    )
 
-    # Build prompt with all search results for Claude to synthesise
-    search_context = ''
-    for item in ambiguous_items:
-        sr = search_results.get(item['food'], {})
-        search_context += f"\n\nIngredient: {item['food']} ({sr.get('qty','?')}g)\nSearch results: {sr.get('snippets', '')}\n"
+    prompt = """You are a nutrition expert with knowledge of standard food sizes from UK/EU food databases.
 
-    prompt = """You are a nutrition expert. Using the web search results below, determine the most accurate practical size equivalent for each ingredient at the given gram weight.
+For each ingredient and gram weight, state the most accurate practical size equivalent.
+Use standard UK egg sizes: Small <53g, Medium 53-63g, Large 63-73g, Very Large 73g+
+Use standard produce sizes based on typical supermarket sizing.
 
-Be specific and confident — give ONE clear recommendation based on the search data.
-Format each suggestion as: "Xg = [practical description] ([size reference from data])"
-Format the short field as just the practical description with no grams.
+Be specific — give ONE clear answer per ingredient.
 
-""" + search_context + """
+Ingredients:
+""" + items_text + """
 
 Respond ONLY with valid JSON, no markdown:
 {
   "suggestions": [
     {"food": "Eggs", "suggestion": "120g = 2 large eggs (UK large eggs weigh 63-73g each)", "short": "2 large eggs"},
-    {"food": "Carrot (raw)", "suggestion": "80g = 1 medium carrot (a medium carrot weighs 75-85g)", "short": "1 medium carrot"}
+    {"food": "Carrot (raw)", "suggestion": "80g = 1 medium carrot (medium carrots weigh 75-100g)", "short": "1 medium carrot"},
+    {"food": "Apple (raw)", "suggestion": "180g = 1 large apple (large apples weigh 180-220g)", "short": "1 large apple"}
   ]
-}"""
+}
 
-    response = claude.messages.create(
-        model='claude-sonnet-4-20250514',
-        max_tokens=1500,
-        messages=[{'role': 'user', 'content': prompt}]
-    )
-
-    raw = response.content[0].text.strip()
-    raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
-    raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
-    raw = re.sub(r'\s*```$', '', raw)
+Include "short" as just the practical description with no grams — this pre-fills the coach input."""
 
     try:
+        response = claude.messages.create(
+            model='claude-sonnet-4-20250514',
+            max_tokens=800,
+            messages=[{'role': 'user', 'content': prompt}]
+        )
+        raw = response.content[0].text.strip()
+        raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
+        raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
+        raw = re.sub(r'\s*```$', '', raw)
         data = json.loads(raw)
+
         sugg_map = {}
         for s in data.get('suggestions', []):
             key = s['food'].lower().strip()
@@ -193,12 +175,12 @@ Respond ONLY with valid JSON, no markdown:
                 item['short'] = match.get('short', '')
             else:
                 qty = int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']
-                item['suggestion'] = f"{qty}g — confirm practical size for the client"
+                item['suggestion'] = f"{qty}g — please confirm practical size"
                 item['short'] = ''
     except Exception:
         for item in ambiguous_items:
             qty = int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']
-            item['suggestion'] = f"{qty}g — confirm practical size for the client"
+            item['suggestion'] = f"{qty}g — please confirm practical size"
             item['short'] = ''
 
     return ambiguous_items
