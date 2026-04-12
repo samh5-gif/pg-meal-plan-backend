@@ -13,7 +13,20 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from PIL import Image as PILImage
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    return response
+
+@app.route('/upload', methods=['OPTIONS'])
+@app.route('/generate', methods=['OPTIONS'])
+@app.route('/health', methods=['OPTIONS'])
+def handle_options():
+    return '', 204
 
 # ── Ambiguous ingredient rules ────────────────────────────────────────────────
 # Items that can't practically be weighed by grams and need a human note
