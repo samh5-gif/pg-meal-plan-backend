@@ -317,7 +317,45 @@ def parse_excel(file_bytes, filename):
             'meals': meals,
         })
 
-    return client_name, days
+    # Parse shopping lists from same workbook
+    shopping_lists = parse_shopping_lists(wb)
+    return client_name, days, shopping_lists
+
+
+def parse_shopping_lists(wb):
+    """Parse all shopping list sheets from workbook. Returns list of {name, note, items}."""
+    shopping_lists = []
+    for sheet_name in wb.sheetnames:
+        nl = sheet_name.lower()
+        if 'shopping' not in nl:
+            continue
+        ws = wb[sheet_name]
+        rows = [r for r in ws.iter_rows(values_only=True) if any(r)]
+        if not rows:
+            continue
+        header = rows[0]
+        col2 = str(header[1]) if len(header) > 1 and header[1] else ''
+        note = ''
+        if '*' in col2:
+            parts = col2.split('*')
+            note = parts[1].strip().strip('*').strip() if len(parts) > 1 else ''
+        if not note:
+            note = 'assumes each meal prepared once'
+        items = []
+        for row in rows[1:]:
+            food = str(row[0]).strip() if row[0] else ''
+            qty  = row[1] if len(row) > 1 and row[1] is not None else ''
+            if not food or food.lower() in ('none', 'nan', 'food item'):
+                continue
+            try:
+                qty_val = float(qty)
+                qty_str = f"{int(qty_val)}g" if qty_val == int(qty_val) else f"{qty_val}g"
+            except:
+                qty_str = str(qty) if qty else ''
+            items.append({'food': food, 'qty': qty_str})
+        if items:
+            shopping_lists.append({'name': sheet_name, 'note': note, 'items': items})
+    return shopping_lists
 
 
 def find_ambiguous(days):
@@ -610,7 +648,47 @@ def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingre
     y += 12
     return y
 
-def generate_pdf_doc(client_name, days, logo_b64):
+def draw_shopping_list(c, shopping_list):
+    """Draw a shopping list page."""
+    y = 48.0
+
+    # Page title
+    draw_text(c, LM, y, shopping_list['name'].upper(), HXB, 18, BLACK)
+    y += 30
+
+    # Note line
+    note_text = f"* {shopping_list['note'].capitalize()}"
+    draw_text(c, LM, y, note_text, H, 9, MID_GREY)
+    y += 20
+
+    # Divider
+    c.saveState(); c.setStrokeColorRGB(*DIVIDER); c.setLineWidth(0.4)
+    c.line(LM, pdf_y(y), RM, pdf_y(y)); c.restoreState()
+    y += 16
+
+    # Column headers
+    draw_text(c, LM, y, 'INGREDIENT', HB, 8, MID_GREY)
+    draw_text(c, RM - 60, y, 'QUANTITY', HB, 8, MID_GREY)
+    y += 14
+
+    # Items — alternating subtle background
+    for i, item in enumerate(shopping_list['items']):
+        if y + 18 > PH - 48:
+            c.showPage()
+            y = 48.0
+
+        # Subtle row background on alternates
+        if i % 2 == 0:
+            rrect(c, LM, pdf_y(y + 16), CW, 16, r=0, fill=OFFWHITE)
+
+        draw_text(c, LM + 8, y + 2, item['food'], H, 9.5, BLACK)
+        # Right-align quantity
+        qty_w = tw(item['qty'], HB, 9.5)
+        draw_text(c, RM - qty_w - 8, y + 2, item['qty'], HB, 9.5, BLACK)
+        y += 16
+
+
+def generate_pdf_doc(client_name, days, logo_b64, shopping_lists=None):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     c.setTitle(f"{client_name} — Meal Plan + Recipe Guide")
@@ -634,6 +712,12 @@ def generate_pdf_doc(client_name, days, logo_b64):
                                meal['ingredients'], steps)
             y += 14
         c.showPage()
+    # Shopping list pages
+    if shopping_lists:
+        for sl in shopping_lists:
+            c.showPage()
+            draw_shopping_list(c, sl)
+
     c.save(); buf.seek(0)
     return buf.read()
 
@@ -654,7 +738,7 @@ def upload():
         return jsonify({'error': 'Please upload an Excel file (.xlsx)'}), 400
     file_bytes = f.read()
     try:
-        client_name, days = parse_excel(file_bytes, f.filename)
+        client_name, days, shopping_lists = parse_excel(file_bytes, f.filename)
     except Exception as e:
         return jsonify({'error': f'Could not parse file: {str(e)}'}), 400
 
@@ -668,7 +752,7 @@ def upload():
 
     import uuid
     sid = str(uuid.uuid4())
-    _sessions[sid] = {'client_name': client_name, 'days': days}
+    _sessions[sid] = {'client_name': client_name, 'days': days, 'shopping_lists': shopping_lists}
     return jsonify({'session_id': sid, 'client_name': client_name, 'day_count': len(days), 'ambiguous': ambiguous})
 
 
@@ -745,8 +829,9 @@ def generate_pdf_route():
     if qty_issues:
         return jsonify({'qty_issues': qty_issues, 'error': 'Quantity mismatch detected — please review.'}), 422
 
+    shopping_lists = sess.get('shopping_lists', [])
     try:
-        pdf_bytes = generate_pdf_doc(client_name, days, logo_b64)
+        pdf_bytes = generate_pdf_doc(client_name, days, logo_b64, shopping_lists)
     except Exception as e:
         import traceback
         return jsonify({'error': f'PDF failed: {str(e)}', 'detail': traceback.format_exc()}), 500
