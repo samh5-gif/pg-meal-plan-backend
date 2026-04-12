@@ -82,49 +82,70 @@ def check_ambiguous(qty_g, food_name):
 
 def lookup_size_suggestions(ambiguous_items):
     """
-    Use Claude to determine practical size equivalents for each ambiguous
-    ingredient based on its exact gram weight. Claude uses its nutrition
-    knowledge to give specific, accurate size descriptions.
+    For each ambiguous ingredient, perform a real web search to find
+    accurate size equivalents for that specific gram weight, then use
+    Claude to synthesise a clean, specific suggestion from the results.
     """
     if not ambiguous_items:
         return ambiguous_items
 
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        for item in ambiguous_items:
+            item['suggestion'] = f"{int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g — confirm practical size"
+            item['short'] = ''
+        return ambiguous_items
+
     claude = get_claude()
 
-    items_text = '\n'.join(
-        f"- {item['food']}: {int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g"
-        for item in ambiguous_items
-    )
+    # Search for each ingredient individually to get real data
+    search_results = {}
+    ddgs = DDGS()
+    for item in ambiguous_items:
+        food_clean = re.sub(r'\s*\([^)]+\)', '', item['food']).strip()
+        qty = int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']
+        query = f"{qty}g {food_clean} size equivalent medium large small UK"
+        try:
+            results = ddgs.text(query, max_results=4) or []
+            snippets = ' | '.join(
+                r.get('body', '')[:200] for r in results[:3] if r.get('body')
+            )
+            search_results[item['food']] = {
+                'query': query,
+                'snippets': snippets or 'No results found',
+                'qty': qty,
+                'food_clean': food_clean,
+            }
+        except Exception:
+            search_results[item['food']] = {
+                'query': query,
+                'snippets': 'Search unavailable',
+                'qty': qty,
+                'food_clean': food_clean,
+            }
 
-    prompt = """You are a nutrition expert helping coaches convert gram weights into practical size descriptions for clients.
+    # Build prompt with all search results for Claude to synthesise
+    search_context = ''
+    for item in ambiguous_items:
+        sr = search_results.get(item['food'], {})
+        search_context += f"\n\nIngredient: {item['food']} ({sr.get('qty','?')}g)\nSearch results: {sr.get('snippets', '')}\n"
 
-For each ingredient and gram weight below, give the most accurate practical size equivalent based on standard food size data.
-Be specific and confident — give ONE clear recommendation, not a range.
+    prompt = """You are a nutrition expert. Using the web search results below, determine the most accurate practical size equivalent for each ingredient at the given gram weight.
 
-Format rules:
-- Start with the gram amount
-- State exactly what that is in practical terms
-- Add the average weight of that size in brackets
+Be specific and confident — give ONE clear recommendation based on the search data.
+Format each suggestion as: "Xg = [practical description] ([size reference from data])"
+Format the short field as just the practical description with no grams.
 
-Examples of good responses:
-- "180g = 1 large apple (large apples typically weigh 180-200g)"
-- "120g = 2 large eggs (a large egg weighs approximately 58-62g)"  
-- "80g = 1 medium carrot (a medium carrot weighs around 75-85g)"
-- "60g = 1 large plum (a large plum weighs approximately 55-70g)"
-- "85g = 1 small-medium banana (a small banana weighs around 80-100g)"
-
-Ingredients:
-""" + items_text + """
+""" + search_context + """
 
 Respond ONLY with valid JSON, no markdown:
 {
   "suggestions": [
-    {"food": "Eggs", "suggestion": "120g = 2 large eggs (a large egg weighs approximately 58-62g)", "short": "2 large eggs"},
-    {"food": "Apple (raw)", "suggestion": "180g = 1 large apple (large apples typically weigh 180-200g)", "short": "1 large apple"}
+    {"food": "Eggs", "suggestion": "120g = 2 large eggs (UK large eggs weigh 63-73g each)", "short": "2 large eggs"},
+    {"food": "Carrot (raw)", "suggestion": "80g = 1 medium carrot (a medium carrot weighs 75-85g)", "short": "1 medium carrot"}
   ]
-}
-
-Include a "short" field with just the practical description (no grams) — this will pre-fill the input box for the coach."""
+}"""
 
     response = claude.messages.create(
         model='claude-sonnet-4-20250514',
@@ -139,12 +160,10 @@ Include a "short" field with just the practical description (no grams) — this 
 
     try:
         data = json.loads(raw)
-        # Build map by food name (case-insensitive, strip common suffixes like "(raw)")
         sugg_map = {}
         for s in data.get('suggestions', []):
             key = s['food'].lower().strip()
             sugg_map[key] = s
-            # Also index without "(raw)", "(cooked)" etc
             clean_key = re.sub(r'\s*\([^)]+\)', '', key).strip()
             sugg_map[clean_key] = s
 
@@ -156,13 +175,14 @@ Include a "short" field with just the practical description (no grams) — this 
                 item['suggestion'] = match.get('suggestion', '')
                 item['short'] = match.get('short', '')
             else:
-                item['suggestion'] = f"{int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g — confirm practical size"
+                qty = int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']
+                item['suggestion'] = f"{qty}g — confirm practical size for the client"
                 item['short'] = ''
-    except Exception as e:
+    except Exception:
         for item in ambiguous_items:
-            if not item.get('suggestion'):
-                item['suggestion'] = f"{int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g — confirm practical size"
-                item['short'] = ''
+            qty = int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']
+            item['suggestion'] = f"{qty}g — confirm practical size for the client"
+            item['short'] = ''
 
     return ambiguous_items
 
