@@ -82,76 +82,87 @@ def check_ambiguous(qty_g, food_name):
 
 def lookup_size_suggestions(ambiguous_items):
     """
-    Use Claude with web_search tool to look up real size equivalents
-    for each ambiguous ingredient based on its gram weight.
-    Returns updated list with 'suggestion' filled in.
+    Use Claude to determine practical size equivalents for each ambiguous
+    ingredient based on its exact gram weight. Claude uses its nutrition
+    knowledge to give specific, accurate size descriptions.
     """
     if not ambiguous_items:
         return ambiguous_items
 
     claude = get_claude()
 
-    # Build one prompt asking about all items at once
     items_text = '\n'.join(
         f"- {item['food']}: {int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g"
         for item in ambiguous_items
     )
 
-    prompt = f"""You are helping a nutrition coach create a recipe guide. 
-For each ingredient below, search the web to find what that gram weight equates to in practical, everyday terms (e.g. "1 large egg", "1 medium apple", "half a medium courgette").
+    prompt = """You are a nutrition expert helping coaches convert gram weights into practical size descriptions for clients.
 
-Use web search to find accurate size equivalents for each item. Base your answer on the actual gram weight given.
+For each ingredient and gram weight below, give the most accurate practical size equivalent based on standard food size data.
+Be specific and confident — give ONE clear recommendation, not a range.
 
-For each item give a single clear sentence recommendation in this format:
-"Based on Xg: [practical size description]. ([brief size reference])."
+Format rules:
+- Start with the gram amount
+- State exactly what that is in practical terms
+- Add the average weight of that size in brackets
 
-Example: "Based on 120g: 2 large eggs. (A large egg is approximately 60g.)"
-Example: "Based on 80g: 1 medium carrot. (A medium carrot weighs around 75-85g.)"
+Examples of good responses:
+- "180g = 1 large apple (large apples typically weigh 180-200g)"
+- "120g = 2 large eggs (a large egg weighs approximately 58-62g)"  
+- "80g = 1 medium carrot (a medium carrot weighs around 75-85g)"
+- "60g = 1 large plum (a large plum weighs approximately 55-70g)"
+- "85g = 1 small-medium banana (a small banana weighs around 80-100g)"
 
-Ingredients to look up:
-{items_text}
+Ingredients:
+""" + items_text + """
 
-Respond ONLY with valid JSON — no markdown, just the object:
-{{
+Respond ONLY with valid JSON, no markdown:
+{
   "suggestions": [
-    {{"food": "Eggs", "suggestion": "Based on 120g: 2 large eggs. (A large egg is approximately 60g.)"}},
-    ...
+    {"food": "Eggs", "suggestion": "120g = 2 large eggs (a large egg weighs approximately 58-62g)", "short": "2 large eggs"},
+    {"food": "Apple (raw)", "suggestion": "180g = 1 large apple (large apples typically weigh 180-200g)", "short": "1 large apple"}
   ]
-}}"""
+}
+
+Include a "short" field with just the practical description (no grams) — this will pre-fill the input box for the coach."""
 
     response = claude.messages.create(
         model='claude-sonnet-4-20250514',
-        max_tokens=1000,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        max_tokens=1500,
         messages=[{'role': 'user', 'content': prompt}]
     )
 
-    # Extract text response (after tool use)
-    raw = ''
-    for block in response.content:
-        if hasattr(block, 'text'):
-            raw += block.text
-
-    raw = raw.strip()
+    raw = response.content[0].text.strip()
     raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
     raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
     raw = re.sub(r'\s*```$', '', raw)
 
     try:
         data = json.loads(raw)
-        sugg_map = {s['food'].lower().strip(): s['suggestion'] for s in data.get('suggestions', [])}
+        # Build map by food name (case-insensitive, strip common suffixes like "(raw)")
+        sugg_map = {}
+        for s in data.get('suggestions', []):
+            key = s['food'].lower().strip()
+            sugg_map[key] = s
+            # Also index without "(raw)", "(cooked)" etc
+            clean_key = re.sub(r'\s*\([^)]+\)', '', key).strip()
+            sugg_map[clean_key] = s
+
         for item in ambiguous_items:
             key = item['food'].lower().strip()
-            if key in sugg_map:
-                item['suggestion'] = sugg_map[key]
+            clean_key = re.sub(r'\s*\([^)]+\)', '', key).strip()
+            match = sugg_map.get(key) or sugg_map.get(clean_key)
+            if match:
+                item['suggestion'] = match.get('suggestion', '')
+                item['short'] = match.get('short', '')
             else:
-                # Fallback if AI didn't cover this one
-                item['suggestion'] = f"Listed as {int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g — please confirm the practical size for the client."
-    except Exception:
-        # If parsing fails, leave suggestions as fallback text
+                item['suggestion'] = f"{int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g — confirm practical size"
+                item['short'] = ''
+    except Exception as e:
         for item in ambiguous_items:
-            if not item['suggestion']:
-                item['suggestion'] = f"Listed as {int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g — please confirm the practical size for the client."
+            if not item.get('suggestion'):
+                item['suggestion'] = f"{int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g — confirm practical size"
+                item['short'] = ''
 
     return ambiguous_items
 
