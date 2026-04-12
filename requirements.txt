@@ -5,3 +5,4 @@ reportlab
 anthropic
 gunicorn
 Pillow
+ddgs
