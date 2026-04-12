@@ -477,23 +477,41 @@ FRUIT_NOTE = ("Note: Any fruit included in today's meals can be eaten as a snack
 def draw_cover(c, client_name, logo_b64):
     c.setFillColorRGB(*BLACK)
     c.rect(0, 0, PW, PH, fill=1, stroke=0)
+
+    # Layout anchored to vertical centre of page
+    # Page height = 841.89pt. Centre = ~421pt from top.
+    # Logo sits above centre, name below.
+    sz = 100
+    logo_top = 280   # top of logo (from top of page)
+    logo_bot = logo_top + sz  # 380
+
     if logo_b64:
         try:
             img_data = base64.b64decode(logo_b64)
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                 tmp.write(img_data); tmp_path = tmp.name
-            sz = 120
-            c.drawImage(tmp_path, PW/2 - sz/2, pdf_y(220 + sz), width=sz, height=sz, mask='auto')
+            c.drawImage(tmp_path, PW/2 - sz/2, pdf_y(logo_bot), width=sz, height=sz, mask='auto')
             os.unlink(tmp_path)
         except: pass
-    draw_centred(c, PW/2, 238, 'PROJECT GAIN', HB, 10, (0.5, 0.5, 0.5))
+
+    # PROJECT GAIN wordmark — 20pt below logo
+    draw_centred(c, PW/2, logo_bot + 14, 'PROJECT GAIN', HB, 9, (0.45, 0.45, 0.45))
+
+    # Rule — 16pt below wordmark
+    rule_y = logo_bot + 38
     c.saveState()
-    c.setStrokeColorRGB(0.3, 0.3, 0.3); c.setLineWidth(0.5)
-    c.line(LM+60, pdf_y(276), RM-60, pdf_y(276))
+    c.setStrokeColorRGB(0.25, 0.25, 0.25); c.setLineWidth(0.5)
+    c.line(LM + 80, pdf_y(rule_y), RM - 80, pdf_y(rule_y))
     c.restoreState()
-    draw_centred(c, PW/2, 294, client_name, HB, 30, WHITE)
-    draw_centred(c, PW/2, 340, 'Personalised Meal Plan + Recipe Guide', H, 12, (0.5, 0.5, 0.5))
-    draw_centred(c, PW/2, PH-55, 'projectgainofficial.com', H, 8, (0.3, 0.3, 0.3))
+
+    # Client name — 16pt below rule
+    draw_centred(c, PW/2, rule_y + 14, client_name, HB, 30, WHITE)
+
+    # Subtitle — 20pt below name
+    draw_centred(c, PW/2, rule_y + 62, 'Personalised Meal Plan + Recipe Guide', H, 11, (0.45, 0.45, 0.45))
+
+    # Footer
+    draw_centred(c, PW/2, PH - 50, 'projectgainofficial.com', H, 8, (0.3, 0.3, 0.3))
 
 def draw_day_header(c, top_y, day_num, kcal, prot, fat, carb, fruit_note):
     box_h = 96.0
