@@ -649,43 +649,39 @@ def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingre
     return y
 
 def draw_shopping_list(c, shopping_list):
-    """Draw a shopping list page."""
+    """Draw a shopping list — rows are 15pt, packed tightly with no gaps."""
+    ROW_H = 15
+
+    def draw_header(y):
+        draw_text(c, LM, y, shopping_list['name'].upper(), HXB, 18, BLACK)
+        y += 28
+        note_text = f"* {shopping_list['note'].capitalize()}"
+        draw_text(c, LM, y, note_text, H, 9, MID_GREY)
+        y += 16
+        c.saveState(); c.setStrokeColorRGB(*DIVIDER); c.setLineWidth(0.4)
+        c.line(LM, pdf_y(y), RM, pdf_y(y)); c.restoreState()
+        y += 12
+        draw_text(c, LM, y, 'INGREDIENT', HB, 8, MID_GREY)
+        draw_text(c, RM - 60, y, 'QUANTITY', HB, 8, MID_GREY)
+        y += 12
+        return y
+
     y = 48.0
+    y = draw_header(y)
 
-    # Page title
-    draw_text(c, LM, y, shopping_list['name'].upper(), HXB, 18, BLACK)
-    y += 30
-
-    # Note line
-    note_text = f"* {shopping_list['note'].capitalize()}"
-    draw_text(c, LM, y, note_text, H, 9, MID_GREY)
-    y += 20
-
-    # Divider
-    c.saveState(); c.setStrokeColorRGB(*DIVIDER); c.setLineWidth(0.4)
-    c.line(LM, pdf_y(y), RM, pdf_y(y)); c.restoreState()
-    y += 16
-
-    # Column headers
-    draw_text(c, LM, y, 'INGREDIENT', HB, 8, MID_GREY)
-    draw_text(c, RM - 60, y, 'QUANTITY', HB, 8, MID_GREY)
-    y += 14
-
-    # Items — alternating subtle background
     for i, item in enumerate(shopping_list['items']):
-        if y + 18 > PH - 48:
+        # Page break — continue with no header repeat, just items
+        if y + ROW_H > PH - 40:
             c.showPage()
             y = 48.0
 
-        # Subtle row background on alternates
         if i % 2 == 0:
-            rrect(c, LM, pdf_y(y + 16), CW, 16, r=0, fill=OFFWHITE)
+            rrect(c, LM, pdf_y(y + ROW_H), CW, ROW_H, r=0, fill=OFFWHITE)
 
         draw_text(c, LM + 8, y + 2, item['food'], H, 9.5, BLACK)
-        # Right-align quantity
         qty_w = tw(item['qty'], HB, 9.5)
         draw_text(c, RM - qty_w - 8, y + 2, item['qty'], HB, 9.5, BLACK)
-        y += 16
+        y += ROW_H
 
 
 def generate_pdf_doc(client_name, days, logo_b64, shopping_lists=None):
