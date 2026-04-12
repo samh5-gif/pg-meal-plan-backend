@@ -109,78 +109,68 @@ def check_ambiguous(qty_g, food_name):
     return None
 
 
-def lookup_size_suggestions(ambiguous_items):
-    """
-    Use Claude to determine accurate practical size equivalents for each
-    ambiguous ingredient based on its gram weight.
-    Claude has accurate food weight knowledge from nutrition databases.
-    """
-    if not ambiguous_items:
-        return ambiguous_items
-
-    claude = get_claude()
-
-    items_text = '\n'.join(
-        f"- {item['food']}: {int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']}g"
-        for item in ambiguous_items
-    )
-
-    prompt = """You are a nutrition expert with knowledge of standard food sizes from UK/EU food databases.
-
-For each ingredient and gram weight, state the most accurate practical size equivalent.
-Use standard UK egg sizes: Small <53g, Medium 53-63g, Large 63-73g, Very Large 73g+
-Use standard produce sizes based on typical supermarket sizing.
-
-Be specific — give ONE clear answer per ingredient.
-
-Ingredients:
-""" + items_text + """
-
-Respond ONLY with valid JSON, no markdown:
-{
-  "suggestions": [
-    {"food": "Eggs", "suggestion": "120g = 2 large eggs (UK large eggs weigh 63-73g each)", "short": "2 large eggs"},
-    {"food": "Carrot (raw)", "suggestion": "80g = 1 medium carrot (medium carrots weigh 75-100g)", "short": "1 medium carrot"},
-    {"food": "Apple (raw)", "suggestion": "180g = 1 large apple (large apples weigh 180-220g)", "short": "1 large apple"}
-  ]
+# Size reference data — weights in grams per unit, indexed by keyword
+_SIZE_DATA = {
+    'egg':          (60,  'large egg',    'UK large eggs weigh 63-73g each'),
+    'apple':        (182, 'large apple',  'large apples weigh around 180-220g'),
+    'banana':       (120, 'medium banana','medium bananas weigh around 110-130g'),
+    'peach':        (175, 'large peach',  'large peaches weigh around 170-200g'),
+    'plum':         (70,  'large plum',   'large plums weigh around 65-85g'),
+    'orange':       (180, 'large orange', 'large oranges weigh around 175-210g'),
+    'pear':         (170, 'medium pear',  'medium pears weigh around 160-190g'),
+    'mango':        (350, 'whole mango',  'a whole large mango weighs around 350g'),
+    'kiwi':         (70,  'kiwi',         'a standard kiwi weighs around 70g'),
+    'grape':        (5,   'grape',        'individual grapes weigh around 5-8g'),
+    'carrot':       (85,  'medium carrot','medium carrots weigh around 75-100g'),
+    'courgette':    (200, 'courgette',    'a whole medium courgette weighs around 200g'),
+    'avocado':      (200, 'avocado',       'a whole medium avocado weighs around 180-220g'),
+    'onion':        (150, 'medium onion', 'a whole medium onion weighs around 140-170g'),
+    'sweet potato': (150, 'medium sweet potato', 'a medium sweet potato weighs around 130-180g'),
+    'potato':       (175, 'medium potato','a medium potato weighs around 150-200g'),
 }
 
-Include "short" as just the practical description with no grams — this pre-fills the coach input."""
+def lookup_size_suggestions(ambiguous_items):
+    """
+    Instant size suggestions using known food weight data.
+    No API call needed — runs in microseconds.
+    """
+    for item in ambiguous_items:
+        name_lower = item['food'].lower()
+        qty = item['qty_g']
+        qty_int = int(qty) if qty == int(qty) else qty
 
-    try:
-        response = claude.messages.create(
-            model='claude-sonnet-4-20250514',
-            max_tokens=800,
-            messages=[{'role': 'user', 'content': prompt}]
-        )
-        raw = response.content[0].text.strip()
-        raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
-        raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
-        raw = re.sub(r'\s*```$', '', raw)
-        data = json.loads(raw)
+        matched = None
+        # Find matching size data entry
+        for keyword, (unit_g, unit_name, reference) in _SIZE_DATA.items():
+            if keyword in name_lower:
+                matched = (unit_g, unit_name, reference)
+                break
 
-        sugg_map = {}
-        for s in data.get('suggestions', []):
-            key = s['food'].lower().strip()
-            sugg_map[key] = s
-            clean_key = re.sub(r'\s*\([^)]+\)', '', key).strip()
-            sugg_map[clean_key] = s
-
-        for item in ambiguous_items:
-            key = item['food'].lower().strip()
-            clean_key = re.sub(r'\s*\([^)]+\)', '', key).strip()
-            match = sugg_map.get(key) or sugg_map.get(clean_key)
-            if match:
-                item['suggestion'] = match.get('suggestion', '')
-                item['short'] = match.get('short', '')
+        if matched:
+            unit_g, unit_name, reference = matched
+            count = qty / unit_g
+            # Round to nearest sensible fraction
+            if count <= 0.4:
+                desc = f"a small portion (~{qty_int}g)"
+                short = f"~{qty_int}g"
+            elif count <= 0.65:
+                desc = f"half an {unit_name}" if unit_name[0] in "aeiou" else "half a {unit_name}"
+                short = f"half an {unit_name}" if unit_name[0] in "aeiou" else "half a {unit_name}"
+            elif count <= 1.3:
+                desc = f"1 {unit_name}"
+                short = f"1 {unit_name}"
+            elif count <= 1.7:
+                desc = f"1-2 {unit_name}s"
+                short = f"1-2 {unit_name}s"
             else:
-                qty = int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']
-                item['suggestion'] = f"{qty}g — please confirm practical size"
-                item['short'] = ''
-    except Exception:
-        for item in ambiguous_items:
-            qty = int(item['qty_g']) if item['qty_g'] == int(item['qty_g']) else item['qty_g']
-            item['suggestion'] = f"{qty}g — please confirm practical size"
+                n = round(count)
+                desc = f"{n} {unit_name}s"
+                short = f"{n} {unit_name}s"
+
+            item['suggestion'] = f"{qty_int}g = {desc} ({reference})"
+            item['short'] = short
+        else:
+            item['suggestion'] = f"{qty_int}g — please confirm the practical size"
             item['short'] = ''
 
     return ambiguous_items
@@ -760,11 +750,8 @@ def upload():
 
     ambiguous = find_ambiguous(days)
 
-    # Use AI + web search to get accurate size suggestions for each ambiguous ingredient
-    try:
-        ambiguous = lookup_size_suggestions(ambiguous)
-    except Exception:
-        pass  # Suggestions will show fallback text — not fatal
+    # Instant size suggestions — no API call, runs in microseconds
+    ambiguous = lookup_size_suggestions(ambiguous)
 
     import uuid
     sid = str(uuid.uuid4())
