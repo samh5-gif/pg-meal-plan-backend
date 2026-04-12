@@ -208,10 +208,12 @@ def parse_excel(file_bytes, filename):
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
         nl = sheet_name.lower()
-        if 'shopping' in nl or ('food' in nl and 'list' in nl):
+        # Skip non-meal sheets
+        if any(skip in nl for skip in ['shopping', 'foodlist', 'food list', 'targets', 'summary', 'notes']):
             continue
-        if 'meal' not in nl and 'day' not in nl:
-            continue
+        # Accept sheets with day/meal/week indicators, or detect by content below
+        has_day_indicator = any(w in nl for w in ['meal', 'day', 'week'])
+        # We'll detect by content too — check after header scan
 
         day_num += 1
         rows = list(ws.iter_rows(values_only=True))
@@ -226,6 +228,16 @@ def parse_excel(file_bytes, filename):
                 break
         if header_row is None:
             continue
+        # If sheet has no day indicator in name, only include if it has meal data
+        if not has_day_indicator:
+            # Check if it looks like a meal plan sheet by scanning for meal-like labels
+            has_meal_data = False
+            for row in rows[header_row+1:header_row+5]:
+                if row and row[0] and str(row[0]).strip().lower() not in ('none', 'nan', ''):
+                    has_meal_data = True
+                    break
+            if not has_meal_data:
+                continue
 
         headers = [str(c).lower().strip() if c else '' for c in rows[header_row]]
 
@@ -252,7 +264,11 @@ def parse_excel(file_bytes, filename):
             if not any(row):
                 continue
             mv = str(row[meal_col]).strip() if meal_col is not None and row[meal_col] else ''
-            if not mv or not re.match(r'meal\s*\d+', mv, re.IGNORECASE):
+            if not mv or mv.lower() in ('none', 'nan', 'meal', 'meal name', 'meal label'):
+                continue
+            # Accept any non-empty meal label: "Meal 1", "Breakfast", "Snack 1", "Lunch" etc
+            # Skip only if it looks like a header or is clearly not a meal
+            if mv.lower() in ('total', 'daily total', 'totals'):
                 continue
             fv = str(row[food_col]).strip() if food_col is not None and row[food_col] else ''
             if not fv or fv.lower() == 'nan':
