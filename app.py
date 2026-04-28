@@ -516,6 +516,7 @@ Rules:
 - Set unclear to true ONLY if you truly cannot determine the dish
 - Never invent ingredients not in the list
 - Do not include nutrition advice or macro info in steps
+- IMPORTANT: Use only plain ASCII characters. No smart quotes, curly apostrophes or special dashes
 
 Meals:
 
@@ -531,8 +532,20 @@ Meals:
     raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
     raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
     raw = re.sub(r'\s*```$', '', raw)
-
-    ai_data = json.loads(raw)
+    # Extract JSON object in case there's surrounding text
+    json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if json_match:
+        raw = json_match.group(0)
+    # Normalise smart quotes and special characters that break JSON parsing
+    raw = raw.replace('\u2018', "'").replace('\u2019', "'")
+    raw = raw.replace('\u201c', '"').replace('\u201d', '"')
+    raw = raw.replace('\u2013', '-').replace('\u2014', '-')
+    try:
+        ai_data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        # Last resort: replace any remaining non-ASCII in string values
+        raw = raw.encode('ascii', 'replace').decode('ascii')
+        ai_data = json.loads(raw)
     ai_map = {(item['day'], item['meal_label']): item for item in ai_data['meals']}
 
     unclear_meals = []
