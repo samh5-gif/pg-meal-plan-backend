@@ -174,8 +174,9 @@ def lookup_size_suggestions(ambiguous_items):
                 desc = f"a small portion (~{qty_int}g)"
                 short = f"~{qty_int}g"
             elif count <= 0.65:
-                desc = f"half an {unit_name}" if unit_name[0] in "aeiou" else "half a {unit_name}"
-                short = f"half an {unit_name}" if unit_name[0] in "aeiou" else "half a {unit_name}"
+                article = "an" if unit_name[0] in "aeiou" else "a"
+                desc = f"half {article} {unit_name}"
+                short = f"half {article} {unit_name}"
             elif count <= 1.3:
                 desc = f"1 {unit_name}"
                 short = f"1 {unit_name}"
