@@ -472,51 +472,49 @@ def day_has_fruit(day):
 
 
 # ── AI Recipe Generation ──────────────────────────────────────────────────────
-def generate_recipes_ai(days):
-    claude = get_claude()
+def _clean_json(raw):
+    """Clean and parse JSON from Claude, handling common issues."""
+    raw = raw.strip()
+    # Strip markdown fences
+    raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
+    raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
+    raw = re.sub(r'\s*```$', '', raw)
+    # Extract JSON object
+    m = re.search(r'\{.*\}', raw, re.DOTALL)
+    if m:
+        raw = m.group(0)
+    # Normalise unicode punctuation
+    for old, new in [('‘',"'"),('’',"'"),('“','"'),('”','"'),
+                     ('–','-'),('—','-'),('…','...')]:
+        raw = raw.replace(old, new)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Strip non-ASCII as last resort
+        raw = raw.encode('ascii', 'replace').decode('ascii')
+        return json.loads(raw)
 
+
+def _generate_batch(claude, batch_meals, batch_num):
+    """Generate recipes for a batch of meals. Returns list of meal dicts."""
     meals_text = []
-    for day in days:
-        for meal in day['meals']:
-            ings = []
-            for ing in meal['ingredients']:
-                label = ing.get('qty_label') or (f"{int(ing['qty_g'])}g" if ing['qty_g'] == int(ing['qty_g']) else f"{ing['qty_g']}g")
-                ings.append(f"  - {label} {ing['food']}")
-            meals_text.append(f"Day {day['day_num']} — {meal['meal_label']}:\n" + '\n'.join(ings))
+    for day_num, meal_label, ings_text in batch_meals:
+        meals_text.append(f"Day {day_num} — {meal_label}:\n{ings_text}")
 
     prompt = """You are a nutrition coach writing a recipe guide for a fitness client.
 
-For each meal below, generate:
-1. A clear, appetising dish name
-2. Concise step-by-step cooking instructions (3-8 steps, written for a client not a chef)
-3. If ingredients are genuinely too unclear to determine a recipe, flag it as unclear
+For each meal, generate a dish name and step-by-step cooking instructions.
 
-Respond ONLY with valid JSON — no markdown, no code fences, just the JSON object:
-{
-  "meals": [
-    {
-      "day": 1,
-      "meal_label": "Meal 1",
-      "dish_name": "Overnight Oats with Blueberries",
-      "steps": [
-        "Combine oats and almond milk in a jar or bowl and stir well.",
-        "Cover and refrigerate overnight.",
-        "In the morning, top with blueberries and a drizzle of honey.",
-        "Serve with your protein water on the side."
-      ],
-      "unclear": false,
-      "unclear_reason": ""
-    }
-  ]
-}
+Respond ONLY with valid JSON — no markdown, no code fences:
+{"meals": [{"day": 1, "meal_label": "Breakfast", "dish_name": "Creamy Porridge", "steps": ["Step 1.", "Step 2."], "unclear": false, "unclear_reason": ""}]}
 
 Rules:
-- Keep steps practical, warm and motivating — written directly to the client
-- Single-item meals (protein water, protein bar, fruit) get 1-2 simple steps
-- Set unclear to true ONLY if you truly cannot determine the dish
+- Steps should be practical and motivating, written directly to the client
+- Single-item meals (protein water, bar, fruit) need only 1-2 steps
+- Set unclear to true only if you genuinely cannot determine the dish
 - Never invent ingredients not in the list
-- Do not include nutrition advice or macro info in steps
-- IMPORTANT: Use only plain ASCII characters. No smart quotes, curly apostrophes or special dashes
+- No nutrition advice in steps
+- Use only plain ASCII characters — no smart quotes or special dashes
 
 Meals:
 
@@ -524,29 +522,50 @@ Meals:
 
     response = claude.messages.create(
         model='claude-sonnet-4-20250514',
-        max_tokens=4000,
+        max_tokens=6000,
         messages=[{'role': 'user', 'content': prompt}]
     )
+    data = _clean_json(response.content[0].text)
+    return data.get('meals', [])
 
-    raw = response.content[0].text.strip()
-    raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
-    raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
-    raw = re.sub(r'\s*```$', '', raw)
-    # Extract JSON object in case there's surrounding text
-    json_match = re.search(r'\{.*\}', raw, re.DOTALL)
-    if json_match:
-        raw = json_match.group(0)
-    # Normalise smart quotes and special characters that break JSON parsing
-    raw = raw.replace('\u2018', "'").replace('\u2019', "'")
-    raw = raw.replace('\u201c', '"').replace('\u201d', '"')
-    raw = raw.replace('\u2013', '-').replace('\u2014', '-')
-    try:
-        ai_data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        # Last resort: replace any remaining non-ASCII in string values
-        raw = raw.encode('ascii', 'replace').decode('ascii')
-        ai_data = json.loads(raw)
-    ai_map = {(item['day'], item['meal_label']): item for item in ai_data['meals']}
+
+def generate_recipes_ai(days):
+    claude = get_claude()
+
+    # Build flat list of all meals with their ingredients text
+    all_meals = []
+    for day in days:
+        for meal in day['meals']:
+            ings = []
+            for ing in meal['ingredients']:
+                label = ing.get('qty_label') or (
+                    f"{int(ing['qty_g'])}g" if ing['qty_g'] == int(ing['qty_g'])
+                    else f"{ing['qty_g']}g"
+                )
+                ings.append(f"  - {label} {ing['food']}")
+            all_meals.append((day['day_num'], meal['meal_label'], '\n'.join(ings)))
+
+    # Process in batches of 6 meals to avoid token limit truncation
+    BATCH_SIZE = 6
+    ai_results = []
+    for i in range(0, len(all_meals), BATCH_SIZE):
+        batch = all_meals[i:i + BATCH_SIZE]
+        try:
+            results = _generate_batch(claude, batch, i // BATCH_SIZE + 1)
+            ai_results.extend(results)
+        except Exception as e:
+            # If a batch fails, add empty placeholders so other batches still work
+            for day_num, meal_label, _ in batch:
+                ai_results.append({
+                    'day': day_num,
+                    'meal_label': meal_label,
+                    'dish_name': meal_label,
+                    'steps': ['Prepare ingredients as listed and enjoy.'],
+                    'unclear': False,
+                    'unclear_reason': '',
+                })
+
+    ai_map = {(item['day'], item['meal_label']): item for item in ai_results}
 
     unclear_meals = []
     for day in days:
