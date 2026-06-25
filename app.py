@@ -507,7 +507,7 @@ def _generate_batch(claude, batch_meals, batch_num):
 For each meal, generate a dish name and step-by-step cooking instructions.
 
 Respond ONLY with valid JSON — no markdown, no code fences:
-{"meals": [{"day": 1, "meal_label": "Breakfast", "dish_name": "Creamy Porridge", "steps": ["Step 1.", "Step 2."], "unclear": false, "unclear_reason": ""}]}
+{"meals": [{"day": 1, "meal_label": "Breakfast", "dish_name": "Creamy Porridge", "steps": ["Fill a medium saucepan with water and bring to a boil.", "Add the oats and stir continuously for 3 minutes."], "unclear": false, "unclear_reason": ""}]}
 
 Rules:
 - Steps should be practical and motivating, written directly to the client
