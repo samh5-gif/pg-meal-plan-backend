@@ -522,7 +522,7 @@ Meals:
 """ + '\n\n'.join(meals_text)
 
     response = claude.messages.create(
-        model='claude-sonnet-4-20250514',
+        model='claude-sonnet-4-6',
         max_tokens=6000,
         messages=[{'role': 'user', 'content': prompt}]
     )
@@ -556,6 +556,7 @@ def generate_recipes_ai(days):
             ai_results.extend(results)
         except Exception as e:
             # If a batch fails, add empty placeholders so other batches still work
+            print(f"[WARN] Batch {i // BATCH_SIZE + 1} failed: {e}")
             for day_num, meal_label, _ in batch:
                 ai_results.append({
                     'day': day_num,
