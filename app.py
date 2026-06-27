@@ -531,6 +531,7 @@ Meals:
 
 
 def generate_recipes_ai(days):
+    import concurrent.futures
     claude = get_claude()
 
     # Build flat list of all meals with their ingredients text
@@ -546,26 +547,33 @@ def generate_recipes_ai(days):
                 ings.append(f"  - {label} {ing['food']}")
             all_meals.append((day['day_num'], meal['meal_label'], '\n'.join(ings)))
 
-    # Process in batches of 6 meals to avoid token limit truncation
+    # Split into batches of 6 meals
     BATCH_SIZE = 6
+    batches = [all_meals[i:i + BATCH_SIZE] for i in range(0, len(all_meals), BATCH_SIZE)]
+
+    # Run all batches in parallel — all fire at once instead of one after another
     ai_results = []
-    for i in range(0, len(all_meals), BATCH_SIZE):
-        batch = all_meals[i:i + BATCH_SIZE]
+    def run_batch(args):
+        idx, batch = args
         try:
-            results = _generate_batch(claude, batch, i // BATCH_SIZE + 1)
-            ai_results.extend(results)
+            results = _generate_batch(claude, batch, idx + 1)
+            return results
         except Exception as e:
-            # If a batch fails, add empty placeholders so other batches still work
-            print(f"[WARN] Batch {i // BATCH_SIZE + 1} failed: {e}")
-            for day_num, meal_label, _ in batch:
-                ai_results.append({
-                    'day': day_num,
-                    'meal_label': meal_label,
-                    'dish_name': meal_label,
-                    'steps': ['Prepare ingredients as listed and enjoy.'],
-                    'unclear': False,
-                    'unclear_reason': '',
-                })
+            print(f"[WARN] Batch {idx + 1} failed: {e}")
+            return [{
+                'day': day_num,
+                'meal_label': meal_label,
+                'dish_name': meal_label,
+                'steps': ['Prepare ingredients as listed and enjoy.'],
+                'unclear': False,
+                'unclear_reason': '',
+            } for day_num, meal_label, _ in batch]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(batches)) as executor:
+        batch_results = list(executor.map(run_batch, enumerate(batches)))
+
+    for results in batch_results:
+        ai_results.extend(results)
 
     ai_map = {(item['day'], item['meal_label']): item for item in ai_results}
 
