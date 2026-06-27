@@ -109,13 +109,15 @@ EXCLUSIONS = ['egg white', 'protein water', 'egg powder', 'passionfruit']
 #   - Root veg (carrot, potato, sweet potato): easy to cut to weight
 #   - Onion, courgette: easy to cut to weight
 AMBIGUOUS_PATTERNS = [
-    # Eggs
+    # Eggs -- whole eggs only. Explicitly excludes compound foods like
+    # egg noodles, egg pasta, egg wraps (egg whites/powder are caught
+    # by EXCLUSIONS before we even reach this point).
     r'\bboiled eggs?\b',
     r'\bscrambled eggs?\b',
     r'\bfried eggs?\b',
     r'\bpoached eggs?\b',
     r'^eggs?$',
-    r'\beggs?\b',
+    r'\beggs?(?!\s*(noodle|pasta|wrap|roll|fried\s*rice|salad|foo\s*yung))',
     # Fruit
     r'\bapple\b',
     r'\bbanana\b',
@@ -428,6 +430,7 @@ def parse_excel(file_bytes, filename):
             meals_dict[mv]['ingredients'].append({
                 'food': fv,
                 'qty_g': qty_g,
+                'qty_label': None,   # filled by apply_clarifications() if coach confirms a size
                 'excel_qty_g': qty_g,
             })
 
@@ -491,6 +494,21 @@ def parse_shopping_lists(wb):
         if items:
             shopping_lists.append({'name': sheet_name, 'note': note, 'items': items})
     return shopping_lists
+
+
+def apply_clarifications(days, clarifications):
+    """
+    Write the coach's confirmed size descriptions (from Step 2) into
+    each matching ingredient as qty_label. The PDF renders qty_label
+    instead of the raw gram weight when it is present.
+    Matching is case-insensitive on the food name.
+    """
+    for day in days:
+        for meal in day['meals']:
+            for ing in meal['ingredients']:
+                key = ing['food'].lower().strip()
+                if key in clarifications:
+                    ing['qty_label'] = clarifications[key]
 
 
 def find_ambiguous(days):
@@ -773,23 +791,21 @@ def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingre
     y += 14
 
     for ing in ingredients:
-        qty_g = ing['qty_g']
-        qs = f"{int(qty_g)}g" if qty_g == int(qty_g) else f"{qty_g}g"
-        food = ing['food']
-        note = get_ingredient_note(food)
-
-        # Always draw exact gram weight in bold
-        draw_text(c, LM+8, y, qs, HB, 9.5, BLACK)
-        x_after_qty = LM+8+tw(qs, HB, 9.5)+5.5
-
-        # Draw food name in regular weight
-        draw_text(c, x_after_qty, y, food, H, 9.5, BLACK)
-        x_after_food = x_after_qty + tw(food, H, 9.5)
-
-        # Draw note (raw weight / uncooked weight) in light grey if present
-        if note:
-            draw_text(c, x_after_food + 5, y, note, H, 8.5, LIGHT_GREY)
-
+        qty_label = ing.get('qty_label')
+        if qty_label:
+            # Coach confirmed a size description (e.g. "2 large eggs") -- use it
+            draw_text(c, LM+8, y, qty_label, HB, 9.5, BLACK)
+            draw_text(c, LM+8+tw(qty_label, HB, 9.5)+5.5, y, ing['food'], H, 9.5, BLACK)
+        else:
+            # Default: exact gram weight from Excel
+            qty_g = ing['qty_g']
+            qs = f"{int(qty_g)}g" if qty_g == int(qty_g) else f"{qty_g}g"
+            note = get_ingredient_note(ing['food'])
+            draw_text(c, LM+8, y, qs, HB, 9.5, BLACK)
+            draw_text(c, LM+8+tw(qs, HB, 9.5)+5.5, y, ing['food'], H, 9.5, BLACK)
+            if note:
+                x_after = LM+8+tw(qs, HB, 9.5)+5.5+tw(ing['food'], H, 9.5)
+                draw_text(c, x_after + 5, y, note, H, 8.5, LIGHT_GREY)
         y += 14
 
     y += 6
@@ -931,6 +947,7 @@ def clarify():
         return jsonify({'error': 'Session expired. Please re-upload.'}), 400
 
     sess = _sessions[sid]
+    apply_clarifications(sess['days'], data.get('clarifications', {}))
 
     try:
         days, unclear_meals = generate_recipes_ai(sess['days'])
