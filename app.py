@@ -164,25 +164,31 @@ def check_ambiguous(qty_g, food_name):
 # Size reference data for whole-unit foods only.
 # Veg (carrot, potato, sweet potato, onion, courgette) and avocado are
 # intentionally excluded -- coaches should weigh these accurately.
-_SIZE_DATA = {
-    'egg':          (63,  'large egg',        'UK large eggs weigh 63-73g each'),
-    'apple':        (182, 'large apple',      'large apples weigh around 180-220g'),
-    'banana':       (120, 'medium banana',    'medium bananas weigh around 110-130g'),
-    'peach':        (175, 'large peach',      'large peaches weigh around 170-200g'),
-    'plum':         (70,  'large plum',       'large plums weigh around 65-85g'),
-    'orange':       (180, 'large orange',     'large oranges weigh around 175-210g'),
-    'pear':         (170, 'medium pear',      'medium pears weigh around 160-190g'),
-    'mango':        (350, 'whole mango',      'a whole large mango weighs around 300-400g'),
-    'kiwi':         (70,  'kiwi',             'a standard kiwi weighs around 70g'),
-    'grape':        (5,   'grape',            'individual grapes weigh around 5-8g'),
-    'clementine':   (85,  'clementine',       'a clementine weighs around 80-90g'),
-    'tangerine':    (85,  'tangerine',        'a tangerine weighs around 80-90g'),
-    'grapefruit':   (300, 'grapefruit',       'a whole grapefruit weighs around 280-320g'),
-    'nectarine':    (150, 'nectarine',        'a nectarine weighs around 140-160g'),
-    'apricot':      (55,  'apricot',          'an apricot weighs around 50-60g'),
-    'fig':          (60,  'fig',              'a fresh fig weighs around 55-65g'),
-    'melon':        (500, 'slice of melon',   'a standard melon slice is around 150-200g; whole melon around 1kg'),
-}
+#
+# Keys are matched with whole-word regex (r'\bKEY\b') so that e.g. 'apple'
+# does NOT match 'pineapple'. More specific entries (pineapple, grapefruit)
+# must be listed before shorter overlapping keys (apple, grape) so the first
+# match wins correctly.
+_SIZE_DATA = [
+    ('pineapple',   r'\bpineapple\b',  160, 'slice of pineapple',  'a standard pineapple slice weighs around 100-200g; a small whole pineapple around 800g'),
+    ('grapefruit',  r'\bgrapefruit\b', 300, 'grapefruit',          'a whole grapefruit weighs around 280-320g'),
+    ('clementine',  r'\bclementine\b', 85,  'clementine',          'a clementine weighs around 80-90g'),
+    ('tangerine',   r'\btangerine\b',  85,  'tangerine',           'a tangerine weighs around 80-90g'),
+    ('nectarine',   r'\bnectarine\b',  150, 'nectarine',           'a nectarine weighs around 140-160g'),
+    ('apricot',     r'\bapricot\b',    55,  'apricot',             'an apricot weighs around 50-60g'),
+    ('melon',       r'\bmelon\b',      200, 'slice of melon',      'a standard melon slice weighs around 150-200g'),
+    ('egg',         r'\beggs?\b',      63,  'large egg',           'UK large eggs weigh 63-73g each'),
+    ('apple',       r'\bapple\b',      182, 'large apple',         'large apples weigh around 180-220g'),
+    ('banana',      r'\bbanana\b',     120, 'medium banana',       'medium bananas weigh around 110-130g'),
+    ('peach',       r'\bpeach\b',      175, 'large peach',         'large peaches weigh around 170-200g'),
+    ('plum',        r'\bplum\b',       70,  'large plum',          'large plums weigh around 65-85g'),
+    ('orange',      r'\borange\b',     180, 'large orange',        'large oranges weigh around 175-210g'),
+    ('pear',        r'\bpear\b',       170, 'medium pear',         'medium pears weigh around 160-190g'),
+    ('mango',       r'\bmango\b',      350, 'whole mango',         'a whole large mango weighs around 300-400g'),
+    ('kiwi',        r'\bkiwi\b',       70,  'kiwi',                'a standard kiwi weighs around 70g'),
+    ('grape',       r'\bgrapes?\b',    5,   'grape',               'individual grapes weigh around 5-8g'),
+    ('fig',         r'\bfig\b',        60,  'fig',                 'a fresh fig weighs around 55-65g'),
+]
 
 _CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'size_cache.json')
 
@@ -219,8 +225,8 @@ def lookup_size_suggestions(ambiguous_items):
         qty_int = int(qty) if qty == int(qty) else qty
 
         matched = None
-        for keyword, (unit_g, unit_name, reference) in _SIZE_DATA.items():
-            if keyword in name_lower:
+        for (_key, pattern, unit_g, unit_name, reference) in _SIZE_DATA:
+            if re.search(pattern, name_lower, re.IGNORECASE):
                 matched = (unit_g, unit_name, reference)
                 break
 
