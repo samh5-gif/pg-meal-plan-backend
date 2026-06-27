@@ -81,15 +81,23 @@ UNCOOKED_WEIGHT_KEYWORDS = [
 def get_ingredient_note(food_name):
     """
     Returns a note string like '(raw weight)' or '(uncooked weight)' if the
-    ingredient warrants one. Returns empty string otherwise.
+    ingredient warrants one AND the note is not already implied by the food
+    name itself (e.g. 'Chicken (raw)' or 'White Pasta (uncooked)' don't need
+    a redundant appended note).
     """
     name = food_name.lower()
     for kw in RAW_WEIGHT_KEYWORDS:
         if kw in name:
-            return '(raw weight)'
+            # Only add the note if 'raw' isn't already in the ingredient name
+            if 'raw' not in name:
+                return '(raw weight)'
+            return ''
     for kw in UNCOOKED_WEIGHT_KEYWORDS:
         if kw in name:
-            return '(uncooked weight)'
+            # Only add the note if 'uncooked', 'dry', or 'dried' isn't already in the name
+            if not any(w in name for w in ('uncooked', 'dry', 'dried')):
+                return '(uncooked weight)'
+            return ''
     return ''
 
 # ---------------------------------------------------------------------------
@@ -793,9 +801,9 @@ def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingre
     for ing in ingredients:
         qty_label = ing.get('qty_label')
         if qty_label:
-            # Coach confirmed a size description (e.g. "2 large eggs") -- use it
+            # Coach confirmed a size description (e.g. "1 large apple") --
+            # show only that label; the food name is already implied by it.
             draw_text(c, LM+8, y, qty_label, HB, 9.5, BLACK)
-            draw_text(c, LM+8+tw(qty_label, HB, 9.5)+5.5, y, ing['food'], H, 9.5, BLACK)
         else:
             # Default: exact gram weight from Excel
             qty_g = ing['qty_g']
