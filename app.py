@@ -72,32 +72,59 @@ RAW_WEIGHT_KEYWORDS = [
     'pork', 'lamb', 'venison', 'duck', 'quorn', 'tofu',
 ]
 
+# Ingredients that CONTAIN a raw-weight keyword but are already cooked/cured/tinned
+# and should NOT receive a "(raw weight)" note.
+RAW_WEIGHT_EXCLUSIONS = [
+    'smoked salmon', 'smoked mackerel', 'smoked trout', 'smoked haddock',
+    'tinned tuna', 'canned tuna', 'tuna tin', 'tuna can', 'tinned salmon',
+    'canned salmon', 'smoked cod', 'tinned mackerel', 'canned mackerel',
+    'tinned sardine', 'canned sardine', 'sardine', 'anchov',
+    'cooked chicken', 'cooked turkey', 'cooked beef', 'cooked pork',
+    'cooked prawn', 'cooked shrimp', 'drained', 'tinned', 'canned',
+]
+
 # These ingredients should show "(uncooked weight)" after their name.
+# Use ' rice' (with leading space) to avoid matching 'rice cakes', 'rice pudding' etc.
 UNCOOKED_WEIGHT_KEYWORDS = [
-    'pasta', 'rice', 'oats', 'porridge oats', 'noodles', 'quinoa',
+    'pasta', ' rice', 'oats', 'porridge oats', 'noodles', 'quinoa',
     'couscous', 'bulgur', 'lentil', 'chickpea',
+]
+
+# Pre-cooked / ready-to-eat rice products that should NOT get '(uncooked weight)'
+UNCOOKED_WEIGHT_EXCLUSIONS = [
+    'rice cake', 'rice pudding', 'rice paper', 'puffed rice', 'rice crisp',
+    'rice cracker', 'microwave rice', 'cooked rice',
 ]
 
 def get_ingredient_note(food_name):
     """
-    Returns a note string like '(raw weight)' or '(uncooked weight)' if the
-    ingredient warrants one AND the note is not already implied by the food
-    name itself (e.g. 'Chicken (raw)' or 'White Pasta (uncooked)' don't need
-    a redundant appended note).
+    Returns '(raw weight)' or '(uncooked weight)' when genuinely needed.
+    Suppresses the note when:
+    - The food name already contains 'raw', 'uncooked', 'dry', 'dried'
+    - The ingredient is cured/smoked/tinned/canned (pre-exclusion list)
     """
     name = food_name.lower()
+
+    # Check raw-weight exclusions first (smoked, tinned, canned, etc.)
+    for excl in RAW_WEIGHT_EXCLUSIONS:
+        if excl in name:
+            return ''
+
     for kw in RAW_WEIGHT_KEYWORDS:
         if kw in name:
-            # Only add the note if 'raw' isn't already in the ingredient name
             if 'raw' not in name:
                 return '(raw weight)'
             return ''
+
     for kw in UNCOOKED_WEIGHT_KEYWORDS:
         if kw in name:
-            # Only add the note if 'uncooked', 'dry', or 'dried' isn't already in the name
+            # Check exclusions first (rice cakes, rice pudding, etc.)
+            if any(excl in name for excl in UNCOOKED_WEIGHT_EXCLUSIONS):
+                return ''
             if not any(w in name for w in ('uncooked', 'dry', 'dried')):
                 return '(uncooked weight)'
             return ''
+
     return ''
 
 # ---------------------------------------------------------------------------
@@ -800,10 +827,32 @@ def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingre
 
     for ing in ingredients:
         qty_label = ing.get('qty_label')
+        qty_g = ing['qty_g']
+        # Skip ingredients with zero weight — these are data entry gaps in the Excel
+        if qty_g == 0 and not qty_label:
+            continue
         if qty_label:
-            # Coach confirmed a size description (e.g. "1 large apple") --
-            # show only that label; the food name is already implied by it.
-            draw_text(c, LM+8, y, qty_label, HB, 9.5, BLACK)
+            # Coach confirmed a size description (e.g. "1-2 large eggs" or "1 kiwi").
+            # Split into a bold quantity token and a regular-weight description,
+            # matching the visual style of normal "80g  Lean Ground Beef" rows.
+            # The quantity token is everything up to and including the first
+            # whitespace-separated word that contains a digit; the rest is the description.
+            import re as _re
+            parts = qty_label.split()
+            # Find the split point: last leading token that is purely numeric/count
+            split = 1
+            for i, p in enumerate(parts):
+                if _re.search(r'\d', p):
+                    split = i + 1
+                else:
+                    break
+            bold_part = ' '.join(parts[:split])
+            rest_part = ' '.join(parts[split:])
+            # Title-case the description portion
+            rest_part = rest_part.title() if rest_part else ''
+            draw_text(c, LM+8, y, bold_part, HB, 9.5, BLACK)
+            if rest_part:
+                draw_text(c, LM+8+tw(bold_part, HB, 9.5)+5.5, y, rest_part, H, 9.5, BLACK)
         else:
             # Default: exact gram weight from Excel
             qty_g = ing['qty_g']
@@ -898,7 +947,8 @@ def generate_pdf_doc(client_name, days, logo_b64, shopping_lists=None):
         for meal in day['meals']:
             steps = meal.get('recipe_steps', [])
             n_step_lines = sum(len(wrap(s, H, 9.5, RM-(LM+24))) for s in steps)
-            card_h = 44+38+18+14+(len(meal['ingredients'])*14)+14+14+(n_step_lines*13)+(len(steps)*2)+12
+            n_ings = sum(1 for i in meal['ingredients'] if i['qty_g'] != 0 or i.get('qty_label'))
+            card_h = 44+38+18+14+(n_ings*14)+14+14+(n_step_lines*13)+(len(steps)*2)+12
             if y + card_h > PH - 40:
                 c.showPage(); y = 48.0
             y = draw_meal_card(c, y, meal['meal_label'], meal.get('dish_name',''),
