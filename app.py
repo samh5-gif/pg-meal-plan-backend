@@ -1,5 +1,5 @@
 """
-Project GAIN — Meal Plan PDF + Recipe Guide Generator
+Project GAIN -- Meal Plan PDF + Recipe Guide Generator
 Backend: Flask API with Anthropic AI for recipe generation
 """
 
@@ -61,6 +61,40 @@ def get_claude():
 
 _sessions = {}
 
+# ---------------------------------------------------------------------------
+# Ingredient note logic
+# ---------------------------------------------------------------------------
+# These ingredients should show "(raw weight)" after their name in the PDF
+# because coaches weigh them raw but clients cook them.
+RAW_WEIGHT_KEYWORDS = [
+    'chicken', 'turkey', 'beef', 'mince', 'steak', 'salmon', 'cod', 'tuna',
+    'tilapia', 'haddock', 'trout', 'sea bass', 'mackerel', 'prawn', 'shrimp',
+    'pork', 'lamb', 'venison', 'duck', 'quorn', 'tofu',
+]
+
+# These ingredients should show "(uncooked weight)" after their name.
+UNCOOKED_WEIGHT_KEYWORDS = [
+    'pasta', 'rice', 'oats', 'porridge oats', 'noodles', 'quinoa',
+    'couscous', 'bulgur', 'lentil', 'chickpea',
+]
+
+def get_ingredient_note(food_name):
+    """
+    Returns a note string like '(raw weight)' or '(uncooked weight)' if the
+    ingredient warrants one. Returns empty string otherwise.
+    """
+    name = food_name.lower()
+    for kw in RAW_WEIGHT_KEYWORDS:
+        if kw in name:
+            return '(raw weight)'
+    for kw in UNCOOKED_WEIGHT_KEYWORDS:
+        if kw in name:
+            return '(uncooked weight)'
+    return ''
+
+# ---------------------------------------------------------------------------
+# Ambiguous count/size detection (eggs, fruit, veg sold by unit not weight)
+# ---------------------------------------------------------------------------
 EXCLUSIONS = ['egg white', 'protein water', 'egg powder', 'passionfruit']
 
 AMBIGUOUS_PATTERNS = [
@@ -102,6 +136,9 @@ def check_ambiguous(qty_g, food_name):
     return None
 
 
+# Size reference data -- used to generate a practical count hint shown in the
+# coach-facing clarification screen only, NOT used to replace the quantity in
+# the PDF. The PDF always shows the exact gram weight from the Excel.
 _SIZE_DATA = {
     'egg':          (60,  'large egg',           'UK large eggs weigh 63-73g each'),
     'apple':        (182, 'large apple',          'large apples weigh around 180-220g'),
@@ -141,6 +178,12 @@ _size_cache = _load_cache()
 
 
 def lookup_size_suggestions(ambiguous_items):
+    """
+    Builds the 'suggestion' string shown in the coach clarification UI.
+    This is informational only -- it is NEVER used to replace the quantity
+    displayed in the PDF. The PDF always renders the exact gram weight from
+    the Excel file.
+    """
     for item in ambiguous_items:
         name_lower = item['food'].lower()
         qty = item['qty_g']
@@ -156,28 +199,21 @@ def lookup_size_suggestions(ambiguous_items):
             unit_g, unit_name, reference = matched
             count = qty / unit_g
             if count <= 0.4:
-                desc = f"a small portion (~{qty_int}g)"
-                short = f"~{qty_int}g"
+                desc = f"a small portion ({qty_int}g)"
             elif count <= 0.65:
                 article = "an" if unit_name[0] in "aeiou" else "a"
                 desc = f"half {article} {unit_name}"
-                short = f"half {article} {unit_name}"
             elif count <= 1.3:
                 desc = f"1 {unit_name}"
-                short = f"1 {unit_name}"
             elif count <= 1.7:
                 desc = f"1-2 {unit_name}s"
-                short = f"1-2 {unit_name}s"
             else:
                 n = round(count)
                 desc = f"{n} {unit_name}s"
-                short = f"{n} {unit_name}s"
 
             item['suggestion'] = f"{qty_int}g = {desc} ({reference})"
-            item['short'] = short
         else:
             item['suggestion'] = None
-            item['short'] = ''
 
     unknown = [i for i in ambiguous_items if i['suggestion'] is None]
 
@@ -186,9 +222,7 @@ def lookup_size_suggestions(ambiguous_items):
         for item in unknown:
             cache_key = f"{item['food'].lower().strip()}:{int(item['qty_g']) if item['qty_g']==int(item['qty_g']) else item['qty_g']}"
             if cache_key in _size_cache:
-                cached = _size_cache[cache_key]
-                item['suggestion'] = cached['suggestion']
-                item['short']      = cached['short']
+                item['suggestion'] = _size_cache[cache_key]
             else:
                 still_unknown.append(item)
 
@@ -201,10 +235,9 @@ def lookup_size_suggestions(ambiguous_items):
                 prompt = (
                     "You are a nutrition expert. For each ingredient and gram weight below, "
                     "give the most accurate practical size equivalent in one short sentence.\n"
-                    "Format: Xg = [description] ([brief weight reference])\n"
-                    "Also give a \"short\" field: just the description, no grams.\n\n"
+                    "Format: Xg = [description] ([brief weight reference])\n\n"
                     "Respond ONLY as valid JSON:\n"
-                    '{"suggestions": [{"food": "X", "suggestion": "50g = 1 small egg (large eggs weigh 63-73g)", "short": "1 small egg"}]}\n\n'
+                    '{"suggestions": [{"food": "X", "suggestion": "50g = 1 small egg (large eggs weigh 63-73g)"}]}\n\n'
                     f"Ingredients:\n{items_text}"
                 )
                 resp = get_claude().messages.create(
@@ -221,24 +254,22 @@ def lookup_size_suggestions(ambiguous_items):
                 sugg_map = {}
                 for s in data.get('suggestions', []):
                     k = s['food'].lower().strip()
-                    sugg_map[k] = s
-                    sugg_map[re.sub(r'\s*\([^)]+\)', '', k).strip()] = s
+                    sugg_map[k] = s.get('suggestion', '')
+                    sugg_map[re.sub(r'\s*\([^)]+\)', '', k).strip()] = s.get('suggestion', '')
 
                 cache_updated = False
                 for item in still_unknown:
                     k  = item['food'].lower().strip()
                     ck = re.sub(r'\s*\([^)]+\)', '', k).strip()
-                    match = sugg_map.get(k) or sugg_map.get(ck)
+                    sugg = sugg_map.get(k) or sugg_map.get(ck)
                     qty_int = int(item['qty_g']) if item['qty_g']==int(item['qty_g']) else item['qty_g']
-                    if match:
-                        item['suggestion'] = match.get('suggestion', '')
-                        item['short']      = match.get('short', '')
+                    if sugg:
+                        item['suggestion'] = sugg
                         cache_key = f"{k}:{qty_int}"
-                        _size_cache[cache_key] = {'suggestion': item['suggestion'], 'short': item['short']}
+                        _size_cache[cache_key] = sugg
                         cache_updated = True
                     else:
-                        item['suggestion'] = f"{qty_int}g — please confirm the practical size"
-                        item['short'] = ''
+                        item['suggestion'] = f"{qty_int}g -- please confirm the practical size"
 
                 if cache_updated:
                     _save_cache(_size_cache)
@@ -246,8 +277,7 @@ def lookup_size_suggestions(ambiguous_items):
             except Exception:
                 for item in still_unknown:
                     qty_int = int(item['qty_g']) if item['qty_g']==int(item['qty_g']) else item['qty_g']
-                    item['suggestion'] = f"{qty_int}g — please confirm the practical size"
-                    item['short'] = ''
+                    item['suggestion'] = f"{qty_int}g -- please confirm the practical size"
 
     return ambiguous_items
 
@@ -261,6 +291,9 @@ def is_fruit(food_name):
     return any(f in name for f in fruits)
 
 
+# ---------------------------------------------------------------------------
+# Excel parsing
+# ---------------------------------------------------------------------------
 def parse_excel(file_bytes, filename):
     stem = os.path.splitext(filename)[0]
     stem = re.sub(r'(?i)meal[\s_-]*plan[\s_-]*[-_]*', '', stem)
@@ -351,7 +384,6 @@ def parse_excel(file_bytes, filename):
             meals_dict[mv]['ingredients'].append({
                 'food': fv,
                 'qty_g': qty_g,
-                'qty_label': None,
                 'excel_qty_g': qty_g,
             })
 
@@ -429,15 +461,6 @@ def find_ambiguous(days):
     return result
 
 
-def apply_clarifications(days, clarifications):
-    for day in days:
-        for meal in day['meals']:
-            for ing in meal['ingredients']:
-                key = ing['food'].lower().strip()
-                if key in clarifications:
-                    ing['qty_label'] = clarifications[key]
-
-
 def has_fruit(days):
     return any(is_fruit(ing['food']) for day in days for meal in day['meals'] for ing in meal['ingredients'])
 
@@ -445,6 +468,9 @@ def day_has_fruit(day):
     return any(is_fruit(ing['food']) for meal in day['meals'] for ing in meal['ingredients'])
 
 
+# ---------------------------------------------------------------------------
+# AI Recipe Generation
+# ---------------------------------------------------------------------------
 def _clean_json(raw):
     raw = raw.strip()
     raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
@@ -506,11 +532,9 @@ def generate_recipes_ai(days):
         for meal in day['meals']:
             ings = []
             for ing in meal['ingredients']:
-                label = ing.get('qty_label') or (
-                    f"{int(ing['qty_g'])}g" if ing['qty_g'] == int(ing['qty_g'])
-                    else f"{ing['qty_g']}g"
-                )
-                ings.append(f"  - {label} {ing['food']}")
+                qty_g = ing['qty_g']
+                qs = f"{int(qty_g)}g" if qty_g == int(qty_g) else f"{qty_g}g"
+                ings.append(f"  - {qs} {ing['food']}")
             all_meals.append((day['day_num'], meal['meal_label'], '\n'.join(ings)))
 
     BATCH_SIZE = 6
@@ -560,6 +584,9 @@ def generate_recipes_ai(days):
     return days, unclear_meals
 
 
+# ---------------------------------------------------------------------------
+# PDF Generation
+# ---------------------------------------------------------------------------
 PW, PH = A4
 LM, RM = 50.0, 545.28
 CW = RM - LM
@@ -567,6 +594,7 @@ BLACK    = (0.08, 0.08, 0.08)
 WHITE    = (1.0,  1.0,  1.0)
 OFFWHITE = (0.96, 0.96, 0.96)
 MID_GREY = (0.45, 0.45, 0.45)
+LIGHT_GREY = (0.65, 0.65, 0.65)
 DIVIDER  = (0.80, 0.80, 0.80)
 DARK_CARD= (0.12, 0.12, 0.12)
 HB  = 'Inter-Bold'      if INTER_AVAILABLE else 'Helvetica-Bold'
@@ -699,16 +727,25 @@ def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingre
 
     draw_text(c, LM, y, 'INGREDIENTS', HB, 8.5, BLACK)
     y += 14
+
     for ing in ingredients:
-        label = ing.get('qty_label')
-        if label:
-            draw_text(c, LM+8, y, label, HB, 9.5, BLACK)
-            draw_text(c, LM+8+tw(label, HB, 9.5)+5.5, y, ing['food'], H, 9.5, BLACK)
-        else:
-            qty_g = ing['qty_g']
-            qs = f"{int(qty_g)}g" if qty_g == int(qty_g) else f"{qty_g}g"
-            draw_text(c, LM+8, y, qs, HB, 9.5, BLACK)
-            draw_text(c, LM+8+tw(qs, HB, 9.5)+5.5, y, ing['food'], H, 9.5, BLACK)
+        qty_g = ing['qty_g']
+        qs = f"{int(qty_g)}g" if qty_g == int(qty_g) else f"{qty_g}g"
+        food = ing['food']
+        note = get_ingredient_note(food)
+
+        # Always draw exact gram weight in bold
+        draw_text(c, LM+8, y, qs, HB, 9.5, BLACK)
+        x_after_qty = LM+8+tw(qs, HB, 9.5)+5.5
+
+        # Draw food name in regular weight
+        draw_text(c, x_after_qty, y, food, H, 9.5, BLACK)
+        x_after_food = x_after_qty + tw(food, H, 9.5)
+
+        # Draw note (raw weight / uncooked weight) in light grey if present
+        if note:
+            draw_text(c, x_after_food + 5, y, note, H, 8.5, LIGHT_GREY)
+
         y += 14
 
     y += 6
@@ -812,6 +849,9 @@ def generate_pdf_doc(client_name, days, logo_b64, shopping_lists=None):
     return buf.read()
 
 
+# ---------------------------------------------------------------------------
+# API Routes
+# ---------------------------------------------------------------------------
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
@@ -847,7 +887,6 @@ def clarify():
         return jsonify({'error': 'Session expired. Please re-upload.'}), 400
 
     sess = _sessions[sid]
-    apply_clarifications(sess['days'], data.get('clarifications', {}))
 
     try:
         days, unclear_meals = generate_recipes_ai(sess['days'])
@@ -868,7 +907,7 @@ def clarify():
                 'dish_name':  m.get('dish_name', ''),
                 'kcal': m['kcal'], 'prot': m['prot'], 'fat': m['fat'], 'carb': m['carb'],
                 'ingredients': [{'food': i['food'], 'qty_g': i['qty_g'],
-                                 'qty_label': i.get('qty_label'), 'excel_qty_g': i.get('excel_qty_g', i['qty_g'])} for i in m['ingredients']],
+                                 'excel_qty_g': i.get('excel_qty_g', i['qty_g'])} for i in m['ingredients']],
                 'recipe_steps': m.get('recipe_steps', []),
                 'needs_clarification': m.get('needs_clarification', False),
             } for m in day['meals']],
