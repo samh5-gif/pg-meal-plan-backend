@@ -660,23 +660,25 @@ def generate_recipes_ai(days):
     for results in batch_results:
         ai_results.extend(results)
 
-    ai_map = {(item['day'], item['meal_label']): item for item in ai_results}
+    # Match AI results back to meals by position, not by meal_label.
+    # The AI is not guaranteed to echo the meal_label back verbatim (it may
+    # rename "Meal 1" to "Breakfast"), so a label-based lookup silently misses
+    # every meal and leaves dish_name and recipe_steps empty.
+    flat_meals = [(day, meal) for day in days for meal in day['meals']]
 
     unclear_meals = []
-    for day in days:
-        for meal in day['meals']:
-            key = (day['day_num'], meal['meal_label'])
-            if key in ai_map:
-                ai = ai_map[key]
-                meal['dish_name'] = ai.get('dish_name', meal['meal_label'])
-                meal['recipe_steps'] = ai.get('steps', [])
-                if ai.get('unclear'):
-                    unclear_meals.append({
-                        'day': day['day_num'],
-                        'meal_label': meal['meal_label'],
-                        'unclear_reason': ai.get('unclear_reason', ''),
-                        'ingredients': [{'food': i['food'], 'qty_g': i['qty_g']} for i in meal['ingredients']],
-                    })
+    for i, (day, meal) in enumerate(flat_meals):
+        if i < len(ai_results):
+            ai = ai_results[i]
+            meal['dish_name'] = ai.get('dish_name', meal['meal_label'])
+            meal['recipe_steps'] = ai.get('steps', [])
+            if ai.get('unclear'):
+                unclear_meals.append({
+                    'day': day['day_num'],
+                    'meal_label': meal['meal_label'],
+                    'unclear_reason': ai.get('unclear_reason', ''),
+                    'ingredients': [{'food': i['food'], 'qty_g': i['qty_g']} for i in meal['ingredients']],
+                })
 
     return days, unclear_meals
 
