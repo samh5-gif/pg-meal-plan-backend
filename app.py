@@ -95,29 +95,51 @@ def get_ingredient_note(food_name):
 # ---------------------------------------------------------------------------
 # Ambiguous count/size detection (eggs, fruit, veg sold by unit not weight)
 # ---------------------------------------------------------------------------
+# Foods excluded from the whole-unit detection entirely (measured by weight
+# as normal, no size hint needed).
 EXCLUSIONS = ['egg white', 'protein water', 'egg powder', 'passionfruit']
 
+# Only flag foods that are genuinely sold/used as whole units and where
+# cutting to an exact gram weight is impractical:
+#   - Eggs: you use a whole egg, you can't cut one to 60g
+#   - Fruit: unlikely to cut part of a piece and store the rest; the whole
+#     fruit is consumed in one go or very soon after
+# Deliberately excluded:
+#   - Avocado: high fat, accurate gram weight is critical for macros
+#   - Root veg (carrot, potato, sweet potato): easy to cut to weight
+#   - Onion, courgette: easy to cut to weight
 AMBIGUOUS_PATTERNS = [
+    # Eggs
     r'\bboiled eggs?\b',
     r'\bscrambled eggs?\b',
     r'\bfried eggs?\b',
     r'\bpoached eggs?\b',
     r'^eggs?$',
+    r'\beggs?\b',
+    # Fruit
     r'\bapple\b',
     r'\bbanana\b',
     r'\bpeach\b',
     r'\bplum\b',
     r'\borange\b',
     r'\bpear\b',
-    r'^mango\b',
+    r'\bmango\b',
     r'\bkiwi\b',
     r'\bgrapes?\b',
-    r'\bcarrots?\b',
-    r'\bcourgette\b',
-    r'\bavocado\b',
-    r'\bonion\b',
-    r'\bsweet potato\b',
-    r'\bpotato\b',
+    r'\bblueberr',
+    r'\bstrawberr',
+    r'\braspberr',
+    r'\bblackberr',
+    r'\bmelon\b',
+    r'\bpineapple\b',
+    r'\bcherry\b',
+    r'\bfig\b',
+    r'\bdate\b',
+    r'\bapricot\b',
+    r'\bnectarine\b',
+    r'\bclementine\b',
+    r'\btangerine\b',
+    r'\bgrapefruit\b',
 ]
 
 def check_ambiguous(qty_g, food_name):
@@ -139,23 +161,27 @@ def check_ambiguous(qty_g, food_name):
 # Size reference data -- used to generate a practical count hint shown in the
 # coach-facing clarification screen only, NOT used to replace the quantity in
 # the PDF. The PDF always shows the exact gram weight from the Excel.
+# Size reference data for whole-unit foods only.
+# Veg (carrot, potato, sweet potato, onion, courgette) and avocado are
+# intentionally excluded -- coaches should weigh these accurately.
 _SIZE_DATA = {
-    'egg':          (60,  'large egg',           'UK large eggs weigh 63-73g each'),
-    'apple':        (182, 'large apple',          'large apples weigh around 180-220g'),
-    'banana':       (120, 'medium banana',        'medium bananas weigh around 110-130g'),
-    'peach':        (175, 'large peach',          'large peaches weigh around 170-200g'),
-    'plum':         (70,  'large plum',           'large plums weigh around 65-85g'),
-    'orange':       (180, 'large orange',         'large oranges weigh around 175-210g'),
-    'pear':         (170, 'medium pear',          'medium pears weigh around 160-190g'),
-    'mango':        (350, 'whole mango',          'a whole large mango weighs around 350g'),
-    'kiwi':         (70,  'kiwi',                 'a standard kiwi weighs around 70g'),
-    'grape':        (5,   'grape',                'individual grapes weigh around 5-8g'),
-    'carrot':       (85,  'medium carrot',        'medium carrots weigh around 75-100g'),
-    'courgette':    (200, 'courgette',            'a whole medium courgette weighs around 200g'),
-    'avocado':      (200, 'avocado',              'a whole medium avocado weighs around 180-220g'),
-    'onion':        (150, 'medium onion',         'a whole medium onion weighs around 140-170g'),
-    'sweet potato': (150, 'medium sweet potato',  'a medium sweet potato weighs around 130-180g'),
-    'potato':       (175, 'medium potato',        'a medium potato weighs around 150-200g'),
+    'egg':          (63,  'large egg',        'UK large eggs weigh 63-73g each'),
+    'apple':        (182, 'large apple',      'large apples weigh around 180-220g'),
+    'banana':       (120, 'medium banana',    'medium bananas weigh around 110-130g'),
+    'peach':        (175, 'large peach',      'large peaches weigh around 170-200g'),
+    'plum':         (70,  'large plum',       'large plums weigh around 65-85g'),
+    'orange':       (180, 'large orange',     'large oranges weigh around 175-210g'),
+    'pear':         (170, 'medium pear',      'medium pears weigh around 160-190g'),
+    'mango':        (350, 'whole mango',      'a whole large mango weighs around 300-400g'),
+    'kiwi':         (70,  'kiwi',             'a standard kiwi weighs around 70g'),
+    'grape':        (5,   'grape',            'individual grapes weigh around 5-8g'),
+    'clementine':   (85,  'clementine',       'a clementine weighs around 80-90g'),
+    'tangerine':    (85,  'tangerine',        'a tangerine weighs around 80-90g'),
+    'grapefruit':   (300, 'grapefruit',       'a whole grapefruit weighs around 280-320g'),
+    'nectarine':    (150, 'nectarine',        'a nectarine weighs around 140-160g'),
+    'apricot':      (55,  'apricot',          'an apricot weighs around 50-60g'),
+    'fig':          (60,  'fig',              'a fresh fig weighs around 55-65g'),
+    'melon':        (500, 'slice of melon',   'a standard melon slice is around 150-200g; whole melon around 1kg'),
 }
 
 _CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'size_cache.json')
