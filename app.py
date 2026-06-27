@@ -511,6 +511,7 @@ Respond ONLY with valid JSON — no markdown, no code fences:
 
 Rules:
 - Steps should be practical and motivating, written directly to the client
+- Keep dish names short and punchy — maximum 5 words (e.g. "Scrambled Eggs on Sourdough" not "Scrambled Eggs and Egg White on Sourdough with Avocado and Spinach")
 - Single-item meals (protein water, bar, fruit) need only 1-2 steps
 - Set unclear to true only if you genuinely cannot determine the dish
 - Never invent ingredients not in the list
@@ -746,10 +747,11 @@ def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingre
 
     draw_text(c, LM, y, 'INGREDIENTS', HB, 8.5, BLACK)
     y += 14
-    for ing in ingredients:
+for ing in ingredients:
         label = ing.get('qty_label')
         if label:
             draw_text(c, LM+8, y, label, HB, 9.5, BLACK)
+            draw_text(c, LM+8+tw(label, HB, 9.5)+5.5, y, ing['food'], H, 9.5, BLACK)
         else:
             qty_g = ing['qty_g']
             qs = f"{int(qty_g)}g" if qty_g == int(qty_g) else f"{qty_g}g"
