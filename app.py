@@ -12,12 +12,10 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfbase.pdfmetrics import stringWidth
 import anthropic
 
-# ── Register Inter fonts for PDF ─────────────────────────────────────────────
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 def _register_fonts():
-    # Try multiple possible font locations
     possible_dirs = [
         os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts'),
         os.path.join(os.getcwd(), 'fonts'),
@@ -37,7 +35,7 @@ def _register_fonts():
             return True
         except Exception:
             continue
-    return False  # Falls back to Helvetica gracefully
+    return False
 
 INTER_AVAILABLE = _register_fonts()
 
@@ -58,17 +56,13 @@ def add_cors(response):
 def options():
     return '', 204
 
-# ── Anthropic client ──────────────────────────────────────────────────────────
 def get_claude():
     return anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
 
-# ── Session store ─────────────────────────────────────────────────────────────
 _sessions = {}
 
-# ── Ambiguous ingredient detection ───────────────────────────────────────────
 EXCLUSIONS = ['egg white', 'protein water', 'egg powder', 'passionfruit']
 
-# Patterns that flag an ingredient as needing size clarification
 AMBIGUOUS_PATTERNS = [
     r'\bboiled eggs?\b',
     r'\bscrambled eggs?\b',
@@ -93,7 +87,6 @@ AMBIGUOUS_PATTERNS = [
 ]
 
 def check_ambiguous(qty_g, food_name):
-    """Flag ingredient as ambiguous if it matches any pattern. Suggestion is filled in later by AI web search."""
     name_lower = food_name.lower()
     for excl in EXCLUSIONS:
         if excl in name_lower:
@@ -104,32 +97,30 @@ def check_ambiguous(qty_g, food_name):
                 'food': food_name,
                 'qty_g': qty_g,
                 'key': name_lower.strip(),
-                'suggestion': None,  # filled in by lookup_size_suggestions()
+                'suggestion': None,
             }
     return None
 
 
-# Size reference data — weights in grams per unit, indexed by keyword
 _SIZE_DATA = {
-    'egg':          (60,  'large egg',    'UK large eggs weigh 63-73g each'),
-    'apple':        (182, 'large apple',  'large apples weigh around 180-220g'),
-    'banana':       (120, 'medium banana','medium bananas weigh around 110-130g'),
-    'peach':        (175, 'large peach',  'large peaches weigh around 170-200g'),
-    'plum':         (70,  'large plum',   'large plums weigh around 65-85g'),
-    'orange':       (180, 'large orange', 'large oranges weigh around 175-210g'),
-    'pear':         (170, 'medium pear',  'medium pears weigh around 160-190g'),
-    'mango':        (350, 'whole mango',  'a whole large mango weighs around 350g'),
-    'kiwi':         (70,  'kiwi',         'a standard kiwi weighs around 70g'),
-    'grape':        (5,   'grape',        'individual grapes weigh around 5-8g'),
-    'carrot':       (85,  'medium carrot','medium carrots weigh around 75-100g'),
-    'courgette':    (200, 'courgette',    'a whole medium courgette weighs around 200g'),
-    'avocado':      (200, 'avocado',       'a whole medium avocado weighs around 180-220g'),
-    'onion':        (150, 'medium onion', 'a whole medium onion weighs around 140-170g'),
-    'sweet potato': (150, 'medium sweet potato', 'a medium sweet potato weighs around 130-180g'),
-    'potato':       (175, 'medium potato','a medium potato weighs around 150-200g'),
+    'egg':          (60,  'large egg',           'UK large eggs weigh 63-73g each'),
+    'apple':        (182, 'large apple',          'large apples weigh around 180-220g'),
+    'banana':       (120, 'medium banana',        'medium bananas weigh around 110-130g'),
+    'peach':        (175, 'large peach',          'large peaches weigh around 170-200g'),
+    'plum':         (70,  'large plum',           'large plums weigh around 65-85g'),
+    'orange':       (180, 'large orange',         'large oranges weigh around 175-210g'),
+    'pear':         (170, 'medium pear',          'medium pears weigh around 160-190g'),
+    'mango':        (350, 'whole mango',          'a whole large mango weighs around 350g'),
+    'kiwi':         (70,  'kiwi',                 'a standard kiwi weighs around 70g'),
+    'grape':        (5,   'grape',                'individual grapes weigh around 5-8g'),
+    'carrot':       (85,  'medium carrot',        'medium carrots weigh around 75-100g'),
+    'courgette':    (200, 'courgette',            'a whole medium courgette weighs around 200g'),
+    'avocado':      (200, 'avocado',              'a whole medium avocado weighs around 180-220g'),
+    'onion':        (150, 'medium onion',         'a whole medium onion weighs around 140-170g'),
+    'sweet potato': (150, 'medium sweet potato',  'a medium sweet potato weighs around 130-180g'),
+    'potato':       (175, 'medium potato',        'a medium potato weighs around 150-200g'),
 }
 
-# ── Persistent size suggestion cache ─────────────────────────────────────────
 _CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'size_cache.json')
 
 def _load_cache():
@@ -150,17 +141,12 @@ _size_cache = _load_cache()
 
 
 def lookup_size_suggestions(ambiguous_items):
-    """
-    Instant size suggestions using known food weight data.
-    No API call needed — runs in microseconds.
-    """
     for item in ambiguous_items:
         name_lower = item['food'].lower()
         qty = item['qty_g']
         qty_int = int(qty) if qty == int(qty) else qty
 
         matched = None
-        # Find matching size data entry
         for keyword, (unit_g, unit_name, reference) in _SIZE_DATA.items():
             if keyword in name_lower:
                 matched = (unit_g, unit_name, reference)
@@ -169,7 +155,6 @@ def lookup_size_suggestions(ambiguous_items):
         if matched:
             unit_g, unit_name, reference = matched
             count = qty / unit_g
-            # Round to nearest sensible fraction
             if count <= 0.4:
                 desc = f"a small portion (~{qty_int}g)"
                 short = f"~{qty_int}g"
@@ -191,15 +176,12 @@ def lookup_size_suggestions(ambiguous_items):
             item['suggestion'] = f"{qty_int}g = {desc} ({reference})"
             item['short'] = short
         else:
-            # Mark for AI fallback
             item['suggestion'] = None
             item['short'] = ''
 
-    # For items not in the hardcoded table, check cache first then fall back to Claude
     unknown = [i for i in ambiguous_items if i['suggestion'] is None]
 
     if unknown:
-        # Step 1: fill from cache where possible
         still_unknown = []
         for item in unknown:
             cache_key = f"{item['food'].lower().strip()}:{int(item['qty_g']) if item['qty_g']==int(item['qty_g']) else item['qty_g']}"
@@ -210,7 +192,6 @@ def lookup_size_suggestions(ambiguous_items):
             else:
                 still_unknown.append(item)
 
-        # Step 2: call Claude only for items not in cache
         if still_unknown:
             try:
                 items_text = '\n'.join(
@@ -252,7 +233,6 @@ def lookup_size_suggestions(ambiguous_items):
                     if match:
                         item['suggestion'] = match.get('suggestion', '')
                         item['short']      = match.get('short', '')
-                        # Save to cache keyed by food + qty
                         cache_key = f"{k}:{qty_int}"
                         _size_cache[cache_key] = {'suggestion': item['suggestion'], 'short': item['short']}
                         cache_updated = True
@@ -271,6 +251,7 @@ def lookup_size_suggestions(ambiguous_items):
 
     return ambiguous_items
 
+
 def is_fruit(food_name):
     fruits = {'apple','banana','peach','plum','orange','pear','mango','kiwi',
               'grape','blueberr','strawberr','raspberr','blackberr','melon',
@@ -279,7 +260,7 @@ def is_fruit(food_name):
     name = food_name.lower()
     return any(f in name for f in fruits)
 
-# ── Excel parsing ─────────────────────────────────────────────────────────────
+
 def parse_excel(file_bytes, filename):
     stem = os.path.splitext(filename)[0]
     stem = re.sub(r'(?i)meal[\s_-]*plan[\s_-]*[-_]*', '', stem)
@@ -294,12 +275,9 @@ def parse_excel(file_bytes, filename):
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
         nl = sheet_name.lower()
-        # Skip non-meal sheets
         if any(skip in nl for skip in ['shopping', 'foodlist', 'food list', 'targets', 'summary', 'notes']):
             continue
-        # Accept sheets with day/meal/week indicators, or detect by content below
         has_day_indicator = any(w in nl for w in ['meal', 'day', 'week'])
-        # We'll detect by content too — check after header scan
 
         day_num += 1
         rows = list(ws.iter_rows(values_only=True))
@@ -314,9 +292,8 @@ def parse_excel(file_bytes, filename):
                 break
         if header_row is None:
             continue
-        # If sheet has no day indicator in name, only include if it has meal data
+
         if not has_day_indicator:
-            # Check if it looks like a meal plan sheet by scanning for meal-like labels
             has_meal_data = False
             for row in rows[header_row+1:header_row+5]:
                 if row and row[0] and str(row[0]).strip().lower() not in ('none', 'nan', ''):
@@ -352,8 +329,6 @@ def parse_excel(file_bytes, filename):
             mv = str(row[meal_col]).strip() if meal_col is not None and row[meal_col] else ''
             if not mv or mv.lower() in ('none', 'nan', 'meal', 'meal name', 'meal label'):
                 continue
-            # Accept any non-empty meal label: "Meal 1", "Breakfast", "Snack 1", "Lunch" etc
-            # Skip only if it looks like a header or is clearly not a meal
             if mv.lower() in ('total', 'daily total', 'totals'):
                 continue
             fv = str(row[food_col]).strip() if food_col is not None and row[food_col] else ''
@@ -403,13 +378,11 @@ def parse_excel(file_bytes, filename):
             'meals': meals,
         })
 
-    # Parse shopping lists from same workbook
     shopping_lists = parse_shopping_lists(wb)
     return client_name, days, shopping_lists
 
 
 def parse_shopping_lists(wb):
-    """Parse all shopping list sheets from workbook. Returns list of {name, note, items}."""
     shopping_lists = []
     for sheet_name in wb.sheetnames:
         nl = sheet_name.lower()
@@ -472,51 +445,44 @@ def day_has_fruit(day):
     return any(is_fruit(ing['food']) for meal in day['meals'] for ing in meal['ingredients'])
 
 
-# ── AI Recipe Generation ──────────────────────────────────────────────────────
 def _clean_json(raw):
-    """Clean and parse JSON from Claude, handling common issues."""
     raw = raw.strip()
-    # Strip markdown fences
     raw = re.sub(r'^```json\s*', '', raw, flags=re.MULTILINE)
     raw = re.sub(r'^```\s*', '', raw, flags=re.MULTILINE)
     raw = re.sub(r'\s*```$', '', raw)
-    # Extract JSON object
     m = re.search(r'\{.*\}', raw, re.DOTALL)
     if m:
         raw = m.group(0)
-    # Normalise unicode punctuation
-    for old, new in [('‘',"'"),('’',"'"),('“','"'),('”','"'),
-                     ('–','-'),('—','-'),('…','...')]:
+    for old, new in [(u'\u2018',"'"),(u'\u2019',"'"),(u'\u201c','"'),(u'\u201d','"'),
+                     (u'\u2013','-'),(u'\u2014','-'),(u'\u2026','...')]:
         raw = raw.replace(old, new)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        # Strip non-ASCII as last resort
         raw = raw.encode('ascii', 'replace').decode('ascii')
         return json.loads(raw)
 
 
 def _generate_batch(claude, batch_meals, batch_num):
-    """Generate recipes for a batch of meals. Returns list of meal dicts."""
     meals_text = []
     for day_num, meal_label, ings_text in batch_meals:
-        meals_text.append(f"Day {day_num} — {meal_label}:\n{ings_text}")
+        meals_text.append(f"Day {day_num} -- {meal_label}:\n{ings_text}")
 
     prompt = """You are a nutrition coach writing a recipe guide for a fitness client.
 
 For each meal, generate a dish name and step-by-step cooking instructions.
 
-Respond ONLY with valid JSON — no markdown, no code fences:
+Respond ONLY with valid JSON -- no markdown, no code fences:
 {"meals": [{"day": 1, "meal_label": "Breakfast", "dish_name": "Creamy Porridge", "steps": ["Fill a medium saucepan with water and bring to a boil.", "Add the oats and stir continuously for 3 minutes."], "unclear": false, "unclear_reason": ""}]}
 
 Rules:
 - Steps should be practical and motivating, written directly to the client
-- Keep dish names short and punchy — maximum 5 words (e.g. "Scrambled Eggs on Sourdough" not "Scrambled Eggs and Egg White on Sourdough with Avocado and Spinach")
+- Keep dish names short and punchy -- maximum 5 words (e.g. "Scrambled Eggs on Sourdough" not "Scrambled Eggs and Egg White on Sourdough with Avocado and Spinach")
 - Single-item meals (protein water, bar, fruit) need only 1-2 steps
 - Set unclear to true only if you genuinely cannot determine the dish
 - Never invent ingredients not in the list
 - No nutrition advice in steps
-- Use only plain ASCII characters — no smart quotes or special dashes
+- Use only plain ASCII characters -- no smart quotes or special dashes
 
 Meals:
 
@@ -535,7 +501,6 @@ def generate_recipes_ai(days):
     import concurrent.futures
     claude = get_claude()
 
-    # Build flat list of all meals with their ingredients text
     all_meals = []
     for day in days:
         for meal in day['meals']:
@@ -548,12 +513,9 @@ def generate_recipes_ai(days):
                 ings.append(f"  - {label} {ing['food']}")
             all_meals.append((day['day_num'], meal['meal_label'], '\n'.join(ings)))
 
-    # Split into batches of 6 meals
     BATCH_SIZE = 6
     batches = [all_meals[i:i + BATCH_SIZE] for i in range(0, len(all_meals), BATCH_SIZE)]
 
-    # Run all batches in parallel — all fire at once instead of one after another
-    ai_results = []
     def run_batch(args):
         idx, batch = args
         try:
@@ -573,6 +535,7 @@ def generate_recipes_ai(days):
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(batches)) as executor:
         batch_results = list(executor.map(run_batch, enumerate(batches)))
 
+    ai_results = []
     for results in batch_results:
         ai_results.extend(results)
 
@@ -597,7 +560,6 @@ def generate_recipes_ai(days):
     return days, unclear_meals
 
 
-# ── PDF Generation ────────────────────────────────────────────────────────────
 PW, PH = A4
 LM, RM = 50.0, 545.28
 CW = RM - LM
@@ -607,10 +569,9 @@ OFFWHITE = (0.96, 0.96, 0.96)
 MID_GREY = (0.45, 0.45, 0.45)
 DIVIDER  = (0.80, 0.80, 0.80)
 DARK_CARD= (0.12, 0.12, 0.12)
-# Use Inter if available, fall back to Helvetica
-HB = 'Inter-Bold' if INTER_AVAILABLE else 'Helvetica-Bold'
+HB  = 'Inter-Bold'      if INTER_AVAILABLE else 'Helvetica-Bold'
 HXB = 'Inter-ExtraBold' if INTER_AVAILABLE else 'Helvetica-Bold'
-H  = 'Inter' if INTER_AVAILABLE else 'Helvetica'
+H   = 'Inter'           if INTER_AVAILABLE else 'Helvetica'
 
 def pdf_y(t): return PH - t
 def tw(t, f, s): return stringWidth(t, f, s)
@@ -655,19 +616,16 @@ def wrap(text, font, size, max_w):
     return lines
 
 FRUIT_NOTE = ("Note: Any fruit included in today's meals can be eaten as a snack at any point "
-              "throughout the day — it pairs particularly well with Greek yoghurt. "
+              "throughout the day -- it pairs particularly well with Greek yoghurt. "
               "This won't impact your results.")
 
 def draw_cover(c, client_name, logo_b64):
     c.setFillColorRGB(*BLACK)
     c.rect(0, 0, PW, PH, fill=1, stroke=0)
 
-    # Layout anchored to vertical centre of page
-    # Page height = 841.89pt. Centre = ~421pt from top.
-    # Logo sits above centre, name below.
     sz = 100
-    logo_top = 280   # top of logo (from top of page)
-    logo_bot = logo_top + sz  # 380
+    logo_top = 280
+    logo_bot = logo_top + sz
 
     if logo_b64:
         try:
@@ -678,24 +636,18 @@ def draw_cover(c, client_name, logo_b64):
             os.unlink(tmp_path)
         except: pass
 
-    # PROJECT GAIN wordmark — 20pt below logo
     draw_centred(c, PW/2, logo_bot + 14, 'PROJECT GAIN', HB, 9, (0.45, 0.45, 0.45))
 
-    # Rule — 16pt below wordmark
     rule_y = logo_bot + 38
     c.saveState()
     c.setStrokeColorRGB(0.25, 0.25, 0.25); c.setLineWidth(0.5)
     c.line(LM + 80, pdf_y(rule_y), RM - 80, pdf_y(rule_y))
     c.restoreState()
 
-    # Client name — 16pt below rule
     draw_centred(c, PW/2, rule_y + 14, client_name, HXB, 30, WHITE)
-
-    # Subtitle — 20pt below name
     draw_centred(c, PW/2, rule_y + 62, 'Personalised Meal Plan + Recipe Guide', H, 11, (0.45, 0.45, 0.45))
-
-    # Footer
     draw_centred(c, PW/2, PH - 50, 'projectgainofficial.com', H, 8, (0.3, 0.3, 0.3))
+
 
 def draw_day_header(c, top_y, day_num, kcal, prot, fat, carb, fruit_note):
     box_h = 96.0
@@ -703,7 +655,7 @@ def draw_day_header(c, top_y, day_num, kcal, prot, fat, carb, fruit_note):
     draw_centred(c, PW/2, top_y+14, f'Day {day_num}', HXB, 22, WHITE)
     pill_w, pill_h, pill_top = 360.0, 26.0, top_y+44
     rrect(c, PW/2-pill_w/2, pdf_y(pill_top+pill_h), pill_w, pill_h, r=5, fill=(0.2, 0.2, 0.2))
-    draw_centred(c, PW/2, pill_top+8, f'{kcal:,} kcal  ·  {prot}g Protein  ·  {fat}g Fats  ·  {carb}g Carbs', HB, 8.5, WHITE)
+    draw_centred(c, PW/2, pill_top+8, f'{kcal:,} kcal  .  {prot}g Protein  .  {fat}g Fats  .  {carb}g Carbs', HB, 8.5, WHITE)
     y = top_y + box_h + 12
     if fruit_note:
         lines = wrap(FRUIT_NOTE, H, 8.5, CW-20)
@@ -716,6 +668,7 @@ def draw_day_header(c, top_y, day_num, kcal, prot, fat, carb, fruit_note):
         y += note_h+10
     return y
 
+
 def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingredients, steps):
     hdr_h = 44.0
     rrect(c, LM, pdf_y(top_y+hdr_h), CW, hdr_h, r=6, fill=DARK_CARD)
@@ -723,7 +676,6 @@ def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingre
     rrect(c, bx, pdf_y(bt+bh), bw, bh, r=3, fill=(0.28, 0.28, 0.28))
     draw_centred(c, bx+bw/2, bt+4, meal_label.upper(), HB, 7, WHITE)
     if dish_name:
-        # Truncate dish name if too wide
         max_dish_w = RM - (bx + bw + 20)
         dish_display = dish_name
         while dish_display and tw(dish_display, HB, 13) > max_dish_w:
@@ -747,7 +699,7 @@ def draw_meal_card(c, top_y, meal_label, dish_name, kcal, prot, fat, carb, ingre
 
     draw_text(c, LM, y, 'INGREDIENTS', HB, 8.5, BLACK)
     y += 14
-for ing in ingredients:
+    for ing in ingredients:
         label = ing.get('qty_label')
         if label:
             draw_text(c, LM+8, y, label, HB, 9.5, BLACK)
@@ -777,8 +729,8 @@ for ing in ingredients:
     y += 12
     return y
 
+
 def draw_shopping_list(c, shopping_list):
-    """Draw a shopping list — rows are 15pt, packed tightly with no gaps."""
     ROW_H = 15
 
     def draw_header(y):
@@ -799,14 +751,11 @@ def draw_shopping_list(c, shopping_list):
     y = draw_header(y)
 
     for i, item in enumerate(shopping_list['items']):
-        # Page break — continue with no header repeat, just items
         if y + ROW_H > PH - 40:
             c.showPage()
             y = 48.0
-
         if i % 2 == 0:
             rrect(c, LM, pdf_y(y + ROW_H), CW, ROW_H, r=0, fill=OFFWHITE)
-
         draw_text(c, LM + 8, y + 2, item['food'], H, 9.5, BLACK)
         qty_w = tw(item['qty'], HB, 9.5)
         draw_text(c, RM - qty_w - 8, y + 2, item['qty'], HB, 9.5, BLACK)
@@ -816,7 +765,7 @@ def draw_shopping_list(c, shopping_list):
 def generate_pdf_doc(client_name, days, logo_b64, shopping_lists=None):
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
-    c.setTitle(f"{client_name} — Meal Plan + Recipe Guide")
+    c.setTitle(f"{client_name} -- Meal Plan + Recipe Guide")
     c.setAuthor("Project GAIN")
     draw_cover(c, client_name, logo_b64)
     c.showPage()
@@ -825,16 +774,14 @@ def generate_pdf_doc(client_name, days, logo_b64, shopping_lists=None):
     y = 48.0
 
     for day in days:
-        # Estimate header height
         hdr_h = 96 + (50 if any_fruit and day_has_fruit(day) else 0) + 12
 
-        # If not at top of page and header won't fit, start new page
         if not first_day:
             if y + hdr_h + 150 > PH - 40:
                 c.showPage()
                 y = 48.0
             else:
-                y += 28  # gap between days on same page
+                y += 28
 
         first_day = False
 
@@ -846,8 +793,6 @@ def generate_pdf_doc(client_name, days, logo_b64, shopping_lists=None):
         for meal in day['meals']:
             steps = meal.get('recipe_steps', [])
             n_step_lines = sum(len(wrap(s, H, 9.5, RM-(LM+24))) for s in steps)
-            # Accurate estimate matching draw_meal_card exactly:
-            # header(44) + macro(38) + gap(18) + ING_label(14) + rows + divider(14) + METHOD_label(14) + steps + trailing(12)
             card_h = 44+38+18+14+(len(meal['ingredients'])*14)+14+14+(n_step_lines*13)+(len(steps)*2)+12
             if y + card_h > PH - 40:
                 c.showPage(); y = 48.0
@@ -855,7 +800,7 @@ def generate_pdf_doc(client_name, days, logo_b64, shopping_lists=None):
                                meal['kcal'], meal['prot'], meal['fat'], meal['carb'],
                                meal['ingredients'], steps)
             y += 14
-    # Shopping list pages — always start on a new page
+
     if shopping_lists:
         c.showPage()
         for i, sl in enumerate(shopping_lists):
@@ -866,8 +811,6 @@ def generate_pdf_doc(client_name, days, logo_b64, shopping_lists=None):
     c.save(); buf.seek(0)
     return buf.read()
 
-
-# ── API Routes ────────────────────────────────────────────────────────────────
 
 @app.route('/health')
 def health():
@@ -888,8 +831,6 @@ def upload():
         return jsonify({'error': f'Could not parse file: {str(e)}'}), 400
 
     ambiguous = find_ambiguous(days)
-
-    # Instant size suggestions — no API call, runs in microseconds
     ambiguous = lookup_size_suggestions(ambiguous)
 
     import uuid
@@ -950,7 +891,6 @@ def generate_pdf_route():
     days = sess['days']
     client_name = sess['client_name']
 
-    # Merge approved edits + verify quantities
     qty_issues = []
     for i, day in enumerate(days):
         if i >= len(approved_days): continue
@@ -969,7 +909,7 @@ def generate_pdf_route():
                                            'food': ing['food'], 'excel_qty': excel_qty, 'submitted_qty': sub_qty})
 
     if qty_issues:
-        return jsonify({'qty_issues': qty_issues, 'error': 'Quantity mismatch detected — please review.'}), 422
+        return jsonify({'qty_issues': qty_issues, 'error': 'Quantity mismatch detected -- please review.'}), 422
 
     shopping_lists = sess.get('shopping_lists', [])
     try:
