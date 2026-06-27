@@ -179,10 +179,13 @@ _size_cache = _load_cache()
 
 def lookup_size_suggestions(ambiguous_items):
     """
-    Builds the 'suggestion' string shown in the coach clarification UI.
-    This is informational only -- it is NEVER used to replace the quantity
-    displayed in the PDF. The PDF always renders the exact gram weight from
-    the Excel file.
+    Builds two fields for each ambiguous item:
+      - 'suggestion': the full informational string shown in the UI hint box
+                      e.g. "100g = 1-2 large eggs (UK large eggs weigh 63-73g each)"
+      - 'short':      the concise count/size string pre-filled into the input box
+                      e.g. "1-2 large eggs"
+    Neither field is used by the PDF. The PDF always renders the exact gram
+    weight from the Excel file.
     """
     for item in ambiguous_items:
         name_lower = item['food'].lower()
@@ -199,21 +202,23 @@ def lookup_size_suggestions(ambiguous_items):
             unit_g, unit_name, reference = matched
             count = qty / unit_g
             if count <= 0.4:
-                desc = f"a small portion ({qty_int}g)"
+                short = f"a small portion ({qty_int}g)"
             elif count <= 0.65:
                 article = "an" if unit_name[0] in "aeiou" else "a"
-                desc = f"half {article} {unit_name}"
+                short = f"half {article} {unit_name}"
             elif count <= 1.3:
-                desc = f"1 {unit_name}"
+                short = f"1 {unit_name}"
             elif count <= 1.7:
-                desc = f"1-2 {unit_name}s"
+                short = f"1-2 {unit_name}s"
             else:
                 n = round(count)
-                desc = f"{n} {unit_name}s"
+                short = f"{n} {unit_name}s"
 
-            item['suggestion'] = f"{qty_int}g = {desc} ({reference})"
+            item['suggestion'] = f"{qty_int}g = {short} ({reference})"
+            item['short'] = short
         else:
             item['suggestion'] = None
+            item['short'] = ''
 
     unknown = [i for i in ambiguous_items if i['suggestion'] is None]
 
@@ -222,7 +227,9 @@ def lookup_size_suggestions(ambiguous_items):
         for item in unknown:
             cache_key = f"{item['food'].lower().strip()}:{int(item['qty_g']) if item['qty_g']==int(item['qty_g']) else item['qty_g']}"
             if cache_key in _size_cache:
-                item['suggestion'] = _size_cache[cache_key]
+                cached = _size_cache[cache_key]
+                item['suggestion'] = cached.get('suggestion', '')
+                item['short']      = cached.get('short', '')
             else:
                 still_unknown.append(item)
 
@@ -234,10 +241,12 @@ def lookup_size_suggestions(ambiguous_items):
                 )
                 prompt = (
                     "You are a nutrition expert. For each ingredient and gram weight below, "
-                    "give the most accurate practical size equivalent in one short sentence.\n"
-                    "Format: Xg = [description] ([brief weight reference])\n\n"
+                    "give the most accurate practical size equivalent.\n"
+                    "Provide two fields:\n"
+                    "  'suggestion': full string e.g. '50g = 1 small egg (large eggs weigh 63-73g)'\n"
+                    "  'short': concise count/size only e.g. '1 small egg'\n\n"
                     "Respond ONLY as valid JSON:\n"
-                    '{"suggestions": [{"food": "X", "suggestion": "50g = 1 small egg (large eggs weigh 63-73g)"}]}\n\n'
+                    '{"suggestions": [{"food": "X", "suggestion": "50g = 1 small egg (large eggs weigh 63-73g)", "short": "1 small egg"}]}\n\n'
                     f"Ingredients:\n{items_text}"
                 )
                 resp = get_claude().messages.create(
@@ -254,22 +263,24 @@ def lookup_size_suggestions(ambiguous_items):
                 sugg_map = {}
                 for s in data.get('suggestions', []):
                     k = s['food'].lower().strip()
-                    sugg_map[k] = s.get('suggestion', '')
-                    sugg_map[re.sub(r'\s*\([^)]+\)', '', k).strip()] = s.get('suggestion', '')
+                    sugg_map[k] = s
+                    sugg_map[re.sub(r'\s*\([^)]+\)', '', k).strip()] = s
 
                 cache_updated = False
                 for item in still_unknown:
                     k  = item['food'].lower().strip()
                     ck = re.sub(r'\s*\([^)]+\)', '', k).strip()
-                    sugg = sugg_map.get(k) or sugg_map.get(ck)
+                    match = sugg_map.get(k) or sugg_map.get(ck)
                     qty_int = int(item['qty_g']) if item['qty_g']==int(item['qty_g']) else item['qty_g']
-                    if sugg:
-                        item['suggestion'] = sugg
+                    if match:
+                        item['suggestion'] = match.get('suggestion', '')
+                        item['short']      = match.get('short', '')
                         cache_key = f"{k}:{qty_int}"
-                        _size_cache[cache_key] = sugg
+                        _size_cache[cache_key] = {'suggestion': item['suggestion'], 'short': item['short']}
                         cache_updated = True
                     else:
                         item['suggestion'] = f"{qty_int}g -- please confirm the practical size"
+                        item['short'] = ''
 
                 if cache_updated:
                     _save_cache(_size_cache)
@@ -278,6 +289,7 @@ def lookup_size_suggestions(ambiguous_items):
                 for item in still_unknown:
                     qty_int = int(item['qty_g']) if item['qty_g']==int(item['qty_g']) else item['qty_g']
                     item['suggestion'] = f"{qty_int}g -- please confirm the practical size"
+                    item['short'] = ''
 
     return ambiguous_items
 
